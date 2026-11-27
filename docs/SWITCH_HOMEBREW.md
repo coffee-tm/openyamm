@@ -41,6 +41,9 @@ Base commit: `77fa3d8` (upstream `pjasicek/openyamm` main).
 
 ## Prerequisites
 
+Step-by-step build instructions, including Windows/MSYS2 and troubleshooting, are in
+[BUILD_SWITCH.zh-CN.md](BUILD_SWITCH.zh-CN.md) (Chinese).
+
 Install devkitPro with at least:
 
 - `switch-dev` (devkitA64, libnx, `nacptool`, `elf2nro`)
@@ -71,7 +74,8 @@ To embed game content in the NRO, stage the exact asset root in a directory and 
 OPENYAMM_SWITCH_ROMFS_DIR=/absolute/path/to/romfs ./switch/validate_switch_build.sh
 ```
 
-The script writes to `build-switch-host/` and `build-switch/`, and checks that
+The script writes to `build-switch-host/` and `build-switch/`, compiles the ESSL shaders into
+`build-switch/runtime/shaders/essl/`, stages them into the ROMFS directory when one is given, and checks that
 `build-switch/OpenYAMM.nro` exists.
 
 ## Build manually
@@ -92,8 +96,14 @@ cmake -S . -B build-switch \
   -DOPENYAMM_HOST_SHADERC=$PWD/build-host/openyamm_shaderc \
   -DOPENYAMM_BUILD_TESTS=OFF \
   -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF
-cmake --build build-switch --target openyamm_switch_nro
+cmake --build build-switch --target openyamm_runtime_shaders --parallel
+cmake --build build-switch --target openyamm_switch_nro --parallel
 ```
+
+The shader target is a separate step: `openyamm_runtime_shaders` is in the default build, but naming only
+`openyamm_switch_nro` does not pull it in, and the NRO then carries no shaders. When embedding ROMFS, copy
+`build-switch/runtime/shaders/` into the staging directory's `runtime/` **before** building the NRO, because the
+ROMFS image is read from the staging directory at packaging time.
 
 The packaged homebrew executable is:
 

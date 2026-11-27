@@ -66,6 +66,27 @@ cmake -S "$ROOT" -B "$SWITCH_BUILD_DIR" \
     -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF \
     "${romfs_args[@]}"
 
+# The ESSL shaders are produced by openyamm_runtime_shaders, which is an ALL target. A build that names only
+# openyamm_switch_nro does not pull it in, and the NRO then ships without shaders and the menu renderer fails.
+echo "==> Compiling ESSL shaders with the host shaderc"
+cmake --build "$SWITCH_BUILD_DIR" --target openyamm_runtime_shaders --parallel
+
+shader_dir="$SWITCH_BUILD_DIR/runtime/shaders/essl"
+shader_count="$(find "$shader_dir" -maxdepth 1 -name '*.bin' -type f 2>/dev/null | wc -l)"
+if [[ "$shader_count" -eq 0 ]]; then
+    echo "No ESSL shaders were produced in $shader_dir" >&2
+    exit 1
+fi
+echo "    $shader_count ESSL shaders in $shader_dir"
+
+# A ROMFS NRO is packaged from the staging directory while the NRO is built, so the shaders have to be in place
+# before elf2nro runs. Stage them now rather than leaving an NRO that cannot find its shaders at runtime.
+if [[ -n "${OPENYAMM_SWITCH_ROMFS_DIR:-}" ]]; then
+    echo "==> Staging shaders into $OPENYAMM_SWITCH_ROMFS_DIR/runtime/shaders"
+    mkdir -p "$OPENYAMM_SWITCH_ROMFS_DIR/runtime/shaders"
+    cp -a "$SWITCH_BUILD_DIR/runtime/shaders/." "$OPENYAMM_SWITCH_ROMFS_DIR/runtime/shaders/"
+fi
+
 echo "==> Building OpenYAMM.nro"
 cmake --build "$SWITCH_BUILD_DIR" --target openyamm_switch_nro --parallel
 
@@ -77,3 +98,8 @@ fi
 
 echo "==> Build OK: $nro"
 echo "Copy it to sdmc:/switch/OpenYAMM.nro on the console."
+if [[ -z "${OPENYAMM_SWITCH_ROMFS_DIR:-}" ]]; then
+    echo
+    echo "This NRO reads assets from the SD card, so the shaders must be deployed too:"
+    echo "  $SWITCH_BUILD_DIR/runtime/shaders  ->  sdmc:/switch/openyamm/assets/runtime/shaders"
+fi
