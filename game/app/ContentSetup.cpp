@@ -181,10 +181,18 @@ ContentSetupResult runContentSetup(const std::string &updateChannelUrl, const st
 {
 #if defined(OPENYAMM_SWITCH)
     (void)updateChannelUrl;
-    (void)assetRoot;
     (void)languageId;
-    std::cerr << "Content setup is unavailable in the Switch build; stage assets in ROMFS or on the SD card.\n";
-    return ContentSetupResult::Quit;
+
+    // No updater exists on the console, but a complete asset root is ready without one; only a missing content
+    // package is fatal, and the message names the two places the content can come from.
+    if (installedContentMissing(assetRoot))
+    {
+        std::cerr << "Content setup is unavailable in the Switch build; stage the game content in ROMFS or on the "
+                     "SD card.\n";
+        return ContentSetupResult::Quit;
+    }
+
+    return ContentSetupResult::Ready;
 #endif
 
     const std::string intro = setupIntro(assetRoot, languageId);

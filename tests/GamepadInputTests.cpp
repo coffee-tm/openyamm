@@ -324,6 +324,23 @@ TEST_CASE("cursor mode diverts the right stick to pointer motion instead of look
     CHECK(gameplay.lookDeltaX != 0.0f);
 }
 
+TEST_CASE("cursor mode moves the cursor with the d-pad instead of holding movement actions")
+{
+    GamepadState state = connectedState();
+    state.buttons[gamepadButtonIndex(GamepadButton::DpadRight)] = true;
+    state.buttons[gamepadButtonIndex(GamepadButton::DpadDown)] = true;
+
+    const GamepadFrameResult cursor = mapGamepadFrame(state, GamepadSettings{}, 0.5f, true);
+    CHECK(cursor.cursorDeltaX == doctest::Approx(GamepadCursorPixelsPerSecond * 0.5f));
+    CHECK(cursor.cursorDeltaY == doctest::Approx(GamepadCursorPixelsPerSecond * 0.5f));
+    CHECK_FALSE(cursor.actionHeld[keyboardActionIndex(KeyboardAction::Right)]);
+    CHECK_FALSE(cursor.actionHeld[keyboardActionIndex(KeyboardAction::Backward)]);
+
+    const GamepadFrameResult gameplay = mapGamepadFrame(state, GamepadSettings{}, 0.5f, false);
+    CHECK(gameplay.actionHeld[keyboardActionIndex(KeyboardAction::Right)]);
+    CHECK(gameplay.actionHeld[keyboardActionIndex(KeyboardAction::Backward)]);
+}
+
 TEST_CASE("cursor mode turns A B and Back into clicks and escape without firing their actions")
 {
     GamepadState state = connectedState();

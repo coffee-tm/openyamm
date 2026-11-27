@@ -10,7 +10,9 @@ Base commit: `77fa3d8` (upstream `pjasicek/openyamm` main).
 
 - `OPENYAMM_SWITCH` CMake option and compile definition.
 - Android low-spec settings profile and ESSL 300 shader path on Switch.
-- Desktop-only OpenGL/X11/host-icon paths skipped; `EGL`, `GLESv3` and `nx` linked.
+- Desktop-only OpenGL/X11/host-icon paths skipped; `EGL`, `GLESv2` (switch-mesa) and `nx` linked.
+- Switch dependencies come from devkitPro portlibs (SDL3, PhysicsFS, FreeType, FFmpeg) instead of host source
+  builds; ENet is not built because network co-op is disabled.
 - SDL initialized with `SDL_INIT_GAMEPAD`, with a graceful fallback if gamepad init fails.
 - SDL gamepad input adapted from upstream PR #5 against the current source:
   - `game/app/GamepadInput.h/.cpp`
@@ -34,19 +36,21 @@ Base commit: `77fa3d8` (upstream `pjasicek/openyamm` main).
 
 - devkitA64 cross build and `.nro` generation.
 - Console smoke test, including ROMFS/SD asset loading and save writing.
-- If devkitA64 cannot build ENet, finish link-time removal of the remaining network sources; the runtime
-  co-op entry points are already disabled.
 - Any platform-specific bgfx/GLES3 issues can only be found on the console.
+- Audio output, suspend/resume and docked/handheld resolution switching.
 
 ## Prerequisites
 
 Install devkitPro with at least:
 
-- `switch-dev`
-- `switch-sdl-3.4`
-- `switch-mesa`
-- portlibs used by OpenYAMM (FFmpeg, FreeType, and others)
-- `nacptool` and `elf2nro` from `switch-tools` / devkitPro tools
+- `switch-dev` (devkitA64, libnx, `nacptool`, `elf2nro`)
+- `switch-sdl3` (the SDL3 port; package names change, confirm with `(dkp-)pacman -Ss sdl3`)
+- `switch-mesa` (EGL + GLES2/3 for the homebrew GLES3 path)
+- `switch-physfs`, `switch-freetype`, `switch-ffmpeg`
+- `switch-pkg-config` (the `aarch64-none-elf-pkg-config` wrapper)
+
+PhysicsFS matters: upstream 3.2.0 has no Switch platform layer, so the build takes the devkitPro package. The same
+applies to SDL3 (upstream has no Switch video backend) and FFmpeg (the bundled `configure` has no Switch target).
 
 Initialize the environment, for example:
 
@@ -112,7 +116,19 @@ romfs:/
 ```
 
 Either root must be a usable OpenYAMM asset root: either loose tier directories or `index.json`
-plus the pack store. User data is always written under:
+plus the pack store. It must also carry the compiled shaders under:
+
+```text
+runtime/shaders/essl/
+```
+
+The menu renderer reads shader binaries from the filesystem, not through PhysFS, and looks in this order:
+`<NRO folder>/runtime/shaders`, `romfs:/runtime/shaders`, `<working directory>/runtime/shaders`, then
+`<working directory>/assets/runtime/shaders`. With the default layout the working directory is
+`sdmc:/switch/openyamm`, so a ROMFS build finds them at `romfs:/runtime/shaders` and an SD build at
+`sdmc:/switch/openyamm/assets/runtime/shaders`.
+
+User data is always written under:
 
 ```text
 sdmc:/switch/openyamm/
@@ -140,6 +156,14 @@ back=quest
 
 The `back=quest` key is kept for compatibility with the current settings schema; it opens the
 inventory. `none` unbinds a button.
+
+## Known gaps
+
+- Nothing in this branch has been compiled with devkitA64 or run on a console yet.
+- Text entry (save names, character names) depends on SDL's Switch backend opening the system keyboard; untested.
+- No rumble or gyro support, and no on-screen button prompts for the pad.
+- The co-op menu is still reachable and reports that network play is unavailable instead of hiding its entries.
+- Output is a 1280x720 surface; docked 1080p output is not selected.
 
 ## Console smoke test
 

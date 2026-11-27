@@ -15,6 +15,50 @@ set(OPENYAMM_SDL3_URL_HASH
     "SHA256=ef39a2e3f9a8a78296c40da701967dd1b0d0d6e267e483863ce70f8a03b4050c"
 )
 
+# Switch builds take their libraries from devkitPro's Switch portlibs. The wrapper pkg-config speaks for the target
+# sysroot; the host pkg-config would report host libraries and must not be used here.
+function(openyamm_switch_pkg_config)
+    if (NOT OPENYAMM_SWITCH)
+        return()
+    endif()
+
+    if (NOT DEFINED DEVKITPRO OR DEVKITPRO STREQUAL "")
+        set(DEVKITPRO "$ENV{DEVKITPRO}")
+    endif()
+
+    find_program(OPENYAMM_SWITCH_PKG_CONFIG
+        NAMES aarch64-none-elf-pkg-config
+        HINTS "${DEVKITPRO}/portlibs/switch/bin" "${DEVKITPRO}/tools/bin"
+        REQUIRED)
+    set(PKG_CONFIG_EXECUTABLE "${OPENYAMM_SWITCH_PKG_CONFIG}" CACHE FILEPATH
+        "pkg-config wrapper for the devkitA64 target sysroot." FORCE)
+    find_package(PkgConfig REQUIRED)
+endfunction()
+
+# Makes ${target} an interface target carrying a pkg-config module's flags; pkg-config creates its own imported
+# target names, which cannot be aliased to the names this project links.
+function(openyamm_switch_pkg_target target module)
+    openyamm_switch_pkg_config()
+    string(MAKE_C_IDENTIFIER "${target}" packagePrefix)
+    pkg_check_modules(OPENYAMM_SWITCH_PKG_${packagePrefix} REQUIRED ${module})
+
+    if (NOT TARGET ${target})
+        add_library(${target} INTERFACE IMPORTED GLOBAL)
+    endif()
+
+    set(modulePrefix "OPENYAMM_SWITCH_PKG_${packagePrefix}")
+    target_include_directories(${target} INTERFACE ${${modulePrefix}_INCLUDE_DIRS})
+    target_compile_options(${target} INTERFACE ${${modulePrefix}_CFLAGS_OTHER})
+    target_link_libraries(${target} INTERFACE ${${modulePrefix}_LINK_LIBRARIES})
+endfunction()
+
+function(openyamm_switch_pkg_found module outputVariable)
+    openyamm_switch_pkg_config()
+    string(MAKE_C_IDENTIFIER "${module}" probePrefix)
+    pkg_check_modules(OPENYAMM_SWITCH_PROBE_${probePrefix} QUIET ${module})
+    set(${outputVariable} ${OPENYAMM_SWITCH_PROBE_${probePrefix}_FOUND} PARENT_SCOPE)
+endfunction()
+
 set(OPENYAMM_BGFX_VERSION "a73c12db8f502022d292cc6fb8872482997b0664")
 set(OPENYAMM_BX_VERSION "0d38df86151b73b7b471a9a7db31deb5f4ce02ca")
 set(OPENYAMM_BIMG_VERSION "6c13a0c8a8908243df475dfcab276554458dcd13")
@@ -47,6 +91,18 @@ endfunction()
 
 function(openyamm_configure_sdl3)
     if (TARGET SDL3::SDL3)
+        return()
+    endif()
+
+    if (OPENYAMM_SWITCH)
+        # Upstream SDL3 has no Nintendo Switch video/input backend. devkitPro ships one as switch-sdl3; its .pc file
+        # is what CMake must use, never a source build for the host.
+        find_package(SDL3 CONFIG QUIET)
+
+        if (NOT TARGET SDL3::SDL3)
+            openyamm_switch_pkg_target(SDL3::SDL3 sdl3)
+        endif()
+
         return()
     endif()
 
@@ -108,6 +164,12 @@ endfunction()
 # ENet 1.3.18 (MIT): the UDP transport of co-op sessions (engine/net/EnetTransport.cpp), chosen by the spike in
 # tools/net_spike. Built from its sources with the checks its own build file makes.
 function(openyamm_configure_enet)
+    if (OPENYAMM_SWITCH)
+        # Network co-op is disabled in the Switch build and engine/net/EnetTransport.cpp compiles a stub instead, so
+        # ENet (and its POSIX socket layer) is not built or linked at all.
+        return()
+    endif()
+
     if (TARGET openyamm_enet)
         return()
     endif()
@@ -265,6 +327,17 @@ function(openyamm_configure_spdlog)
 endfunction()
 
 function(openyamm_configure_freetype)
+    if (OPENYAMM_SWITCH)
+        # switch-freetype is the portlib the rest of the Switch stack links; the source build has no Switch-specific
+        # configuration and pulls zlib/brotli that the portlib already resolves.
+        openyamm_switch_pkg_found(freetype2 OPENYAMM_SWITCH_HAVE_FREETYPE)
+
+        if (OPENYAMM_SWITCH_HAVE_FREETYPE)
+            openyamm_switch_pkg_target(freetype freetype2)
+            return()
+        endif()
+    endif()
+
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     set(FT_DISABLE_BROTLI ON CACHE BOOL "" FORCE)
     set(FT_DISABLE_BZIP2 ON CACHE BOOL "" FORCE)
@@ -284,6 +357,13 @@ function(openyamm_configure_freetype)
 endfunction()
 
 function(openyamm_configure_physfs)
+    if (OPENYAMM_SWITCH)
+        # PhysicsFS 3.2.0 has no Switch platform layer, so a source build fails at configure time. devkitPro ships a
+        # Switch package whose platform layer uses libnx's devoptab.
+        openyamm_switch_pkg_target(physfs-static physfs)
+        return()
+    endif()
+
     set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
     set(PHYSFS_BUILD_DOCS OFF CACHE BOOL "" FORCE)
     set(PHYSFS_BUILD_SHARED OFF CACHE BOOL "" FORCE)

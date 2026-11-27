@@ -5,6 +5,17 @@ function(openyamm_configure_ffmpeg)
         return()
     endif()
 
+    if (OPENYAMM_SWITCH)
+        # devkitPro's switch-ffmpeg is built for libnx. The bundled configure script has no Switch target and would
+        # otherwise build host libraries into the Switch link.
+        openyamm_switch_pkg_config()
+        pkg_check_modules(OPENYAMM_SWITCH_FFMPEG REQUIRED
+            libavformat libavcodec libswresample libswscale libavutil)
+        set(OPENYAMM_FFMPEG_SWITCH_INCLUDE_DIRS "${OPENYAMM_SWITCH_FFMPEG_INCLUDE_DIRS}" PARENT_SCOPE)
+        set(OPENYAMM_FFMPEG_SWITCH_LIBRARIES "${OPENYAMM_SWITCH_FFMPEG_LINK_LIBRARIES}" PARENT_SCOPE)
+        return()
+    endif()
+
     find_program(OPENYAMM_FFMPEG_MAKE_PROGRAM make REQUIRED)
 
     if (NOT DEFINED OPENYAMM_FFMPEG_SOURCE_DIR OR OPENYAMM_FFMPEG_SOURCE_DIR STREQUAL "")
@@ -182,6 +193,12 @@ function(openyamm_configure_ffmpeg)
 endfunction()
 
 function(openyamm_target_link_ffmpeg targetName)
+    if (OPENYAMM_SWITCH)
+        target_include_directories(${targetName} PRIVATE ${OPENYAMM_FFMPEG_SWITCH_INCLUDE_DIRS})
+        target_link_libraries(${targetName} PRIVATE ${OPENYAMM_FFMPEG_SWITCH_LIBRARIES})
+        return()
+    endif()
+
     target_include_directories(${targetName}
         PRIVATE
             "${OPENYAMM_FFMPEG_INCLUDE_DIR}"

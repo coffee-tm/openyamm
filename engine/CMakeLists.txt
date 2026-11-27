@@ -70,8 +70,12 @@ target_link_libraries(openyamm_engine
         freetype
         libzstd_static
         openyamm_monocypher
-        openyamm_enet
 )
+
+# ENet is a desktop/mobile transport; the Switch build compiles the stub in EnetTransport.cpp instead.
+if (TARGET openyamm_enet)
+    target_link_libraries(openyamm_engine PRIVATE openyamm_enet)
+endif()
 
 if (WIN32)
     target_link_libraries(openyamm_engine PRIVATE winhttp)

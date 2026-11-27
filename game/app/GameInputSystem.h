@@ -85,6 +85,12 @@ private:
     GamepadInput m_gamepadInput;
     uint64_t m_lastGamepadFrameTickNanoseconds = 0;
     bool m_previousGamepadEscapeHeld = false;
+#if defined(OPENYAMM_SWITCH)
+    // The console has no mouse, so the emulated cursor's position has to live here: SDL_GetMouseState would report
+    // (0, 0) every frame and any movement the pad applied would be lost before the next one.
+    std::array<float, 2> m_gamepadCursorPosition = {0.0f, 0.0f};
+    bool m_gamepadCursorReady = false;
+#endif
     std::optional<std::array<float, 2>> m_mobilePointerPosition;
     std::string m_pendingTextInput;
     std::array<uint16_t, SDL_SCANCODE_COUNT> m_pendingKeyboardPressCounts = {};

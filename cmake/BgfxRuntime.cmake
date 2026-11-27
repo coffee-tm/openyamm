@@ -302,9 +302,23 @@ function(openyamm_configure_bgfx_runtime)
             if (NOT IOS)
                 target_link_libraries(openyamm_bgfx PUBLIC "-framework IOKit")
             endif()
-        elseif (ANDROID OR OPENYAMM_SWITCH)
-            # switch-mesa provides EGL + GLESv3; libnx provides the rest.
-            target_link_libraries(openyamm_bgfx PUBLIC EGL GLESv3 nx)
+        elseif (OPENYAMM_SWITCH)
+            # switch-mesa's GLES3 entry points live in libGLESv2 (there is no libGLESv3 on the Switch portlibs).
+            # Prefer its pkg-config files so Mesa's private dependencies come along; fall back to the link names.
+            openyamm_switch_pkg_found(egl OPENYAMM_SWITCH_HAVE_EGL)
+            openyamm_switch_pkg_found(glesv2 OPENYAMM_SWITCH_HAVE_GLES)
+
+            if (OPENYAMM_SWITCH_HAVE_EGL AND OPENYAMM_SWITCH_HAVE_GLES)
+                openyamm_switch_pkg_target(openyamm_switch_egl egl)
+                openyamm_switch_pkg_target(openyamm_switch_gles glesv2)
+                target_link_libraries(openyamm_bgfx PUBLIC openyamm_switch_egl openyamm_switch_gles nx)
+            else()
+                message(WARNING
+                    "switch-mesa pkg-config files (egl, glesv2) were not found; linking EGL and GLESv2 by name.")
+                target_link_libraries(openyamm_bgfx PUBLIC EGL GLESv2 nx)
+            endif()
+        elseif (ANDROID)
+            target_link_libraries(openyamm_bgfx PUBLIC EGL GLESv3 android log)
         else()
             target_link_libraries(openyamm_bgfx PUBLIC OpenGL::GL)
         endif()

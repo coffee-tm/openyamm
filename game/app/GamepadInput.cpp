@@ -237,6 +237,20 @@ GamepadFrameResult mapGamepadFrame(
                 result.escapeHeld = true;
                 continue;
             }
+
+            // Menus hit-test the pointer, not the movement actions, so the D-pad has to move the cursor itself;
+            // otherwise a menu can only be navigated with the right stick.
+            const float cursorStep =
+                GamepadCursorPixelsPerSecond * std::max(settings.lookSensitivity, 0.0f) * std::max(deltaSeconds, 0.0f);
+
+            switch (definition.button)
+            {
+            case GamepadButton::DpadLeft: result.cursorDeltaX -= cursorStep; continue;
+            case GamepadButton::DpadRight: result.cursorDeltaX += cursorStep; continue;
+            case GamepadButton::DpadUp: result.cursorDeltaY -= cursorStep; continue;
+            case GamepadButton::DpadDown: result.cursorDeltaY += cursorStep; continue;
+            default: break;
+            }
         }
 
         hold(settings.action(definition.button));
@@ -255,8 +269,9 @@ GamepadFrameResult mapGamepadFrame(
     if (cursorMode)
     {
         const float cursorScale = GamepadCursorPixelsPerSecond * sensitivity;
-        result.cursorDeltaX = rightX * cursorScale;
-        result.cursorDeltaY = rightY * cursorScale;
+        // += keeps any D-pad step collected above.
+        result.cursorDeltaX += rightX * cursorScale;
+        result.cursorDeltaY += rightY * cursorScale;
     }
     else
     {
@@ -279,7 +294,16 @@ bool isGamepadSdlEvent(const SDL_Event &event)
 
 GamepadInput::~GamepadInput()
 {
-    closeAll();
+    // The application object outlives EngineApplication::run(), which quits SDL on the way out. Closing a gamepad
+    // after SDL_Quit is not valid, so only touch them while the gamepad subsystem is still up.
+    if (SDL_WasInit(SDL_INIT_GAMEPAD))
+    {
+        closeAll();
+    }
+    else
+    {
+        m_gamepads.clear();
+    }
 }
 
 void GamepadInput::handleSdlEvent(const SDL_Event &event)

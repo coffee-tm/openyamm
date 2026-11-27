@@ -345,11 +345,32 @@ void GameInputSystem::updateFromEngineInput(
         }
     }
 
+#if defined(OPENYAMM_SWITCH)
+    // No mouse exists on the console: keep the emulated cursor where the pad left it. Reading the mouse here would
+    // return (0, 0) every frame and undo the movement applied below.
+    const SDL_MouseButtonFlags mouseButtons = SDL_GetMouseState(nullptr, nullptr);
+
+    if (!m_gamepadCursorReady && screenWidth > 0 && screenHeight > 0)
+    {
+        m_gamepadCursorPosition = {static_cast<float>(screenWidth) * 0.5f, static_cast<float>(screenHeight) * 0.5f};
+        m_gamepadCursorReady = true;
+    }
+
+    if (screenWidth > 0 && screenHeight > 0 && m_gamepadCursorReady)
+    {
+        m_gamepadCursorPosition[0] = std::clamp(m_gamepadCursorPosition[0], 0.0f, static_cast<float>(screenWidth - 1));
+        m_gamepadCursorPosition[1] = std::clamp(m_gamepadCursorPosition[1], 0.0f, static_cast<float>(screenHeight - 1));
+    }
+
+    m_frame.pointerX = m_gamepadCursorPosition[0];
+    m_frame.pointerY = m_gamepadCursorPosition[1];
+#else
     float pointerX = 0.0f;
     float pointerY = 0.0f;
     const SDL_MouseButtonFlags mouseButtons = SDL_GetMouseState(&pointerX, &pointerY);
     m_frame.pointerX = pointerX;
     m_frame.pointerY = pointerY;
+#endif
 
     const bool physicalLeftMouseButtonHeld = (mouseButtons & SDL_BUTTON_LMASK) != 0;
     const bool physicalRightMouseButtonHeld = (mouseButtons & SDL_BUTTON_RMASK) != 0;
@@ -1049,6 +1070,10 @@ void GameInputSystem::updateFromEngineInput(
                 m_frame.pointerX = cursorX;
                 m_frame.pointerY = cursorY;
 
+#if defined(OPENYAMM_SWITCH)
+                m_gamepadCursorPosition = {cursorX, cursorY};
+#endif
+
                 if (pGamepadWindow != nullptr)
                 {
                     SDL_WarpMouseInWindow(pGamepadWindow, cursorX, cursorY);
@@ -1092,6 +1117,12 @@ void GameInputSystem::updateFromEngineInput(
 
         m_frame.relativeMouseX += gamepad.lookDeltaX;
         m_frame.relativeMouseY += gamepad.lookDeltaY;
+    }
+    else
+    {
+        // While another input (chat line, debug console) takes every key the pad is not sampled; a release that
+        // happens in that window must not leave a stale "still held" edge for the next press.
+        m_previousGamepadEscapeHeld = false;
     }
 
     m_frame.leftMouseButton = buildButtonState(leftMouseButtonHeld, m_previousLeftMouseButtonHeld);

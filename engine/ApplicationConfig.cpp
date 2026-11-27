@@ -55,6 +55,12 @@ ApplicationConfig ApplicationConfig::createDefault()
     config.windowWidth = OPENYAMM_WINDOW_WIDTH;
     config.windowHeight = OPENYAMM_WINDOW_HEIGHT;
     config.windowMode = WindowMode::Windowed;
+#if defined(OPENYAMM_SWITCH)
+    // The console's handheld and docked surfaces are 1280x720; a desktop-sized window makes the HUD canvases and the
+    // low-spec profile scale against the wrong size. The Switch SDL backend presents this fullscreen.
+    config.windowWidth = 1280;
+    config.windowHeight = 720;
+#endif
     config.verticalSync = false;
     config.maxAnisotropy = 4;
     config.fpsTrace = false;

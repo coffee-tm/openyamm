@@ -156,6 +156,15 @@ int main(int argc, char **argv)
         return 2;
     }
 #else
+    // The asset root can still name romfs:/ without the ROMFS define (a manual -DOPENYAMM_SWITCH_ASSET_ROOT);
+    // playing from an unmounted device would fail later with no explanation.
+    if (switchAssetRoot().starts_with("romfs:"))
+    {
+        std::fprintf(stderr, "OPENYAMM_SWITCH_ASSET_ROOT names romfs:/ but this NRO has no embedded ROMFS.\n");
+        unmountRomfs();
+        return 2;
+    }
+
     (void)romfsReady;
 #endif
 

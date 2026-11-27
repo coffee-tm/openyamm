@@ -82,27 +82,39 @@ std::filesystem::path getShaderPath(bgfx::RendererType::Enum rendererType, const
         return configuredShaderRoot / shaderName;
     }
 
+    std::vector<std::filesystem::path> candidates;
+
     if (const char *pBasePath = SDL_GetBasePath())
     {
         const std::filesystem::path executableRoot = pBasePath;
-        const std::filesystem::path packagedPath = executableRoot / configuredShaderRoot / shaderName;
-
-        if (std::filesystem::exists(packagedPath))
-        {
-            return packagedPath;
-        }
-
-        const std::filesystem::path buildTreePath = executableRoot / ".." / configuredShaderRoot / shaderName;
-
-        if (std::filesystem::exists(buildTreePath))
-        {
-            return buildTreePath;
-        }
-
-        return packagedPath;
+        candidates.push_back(executableRoot / configuredShaderRoot / shaderName);
+        candidates.push_back(executableRoot / ".." / configuredShaderRoot / shaderName);
     }
 
-    return configuredShaderRoot / shaderName;
+    // Switch: the game assets live on a ROMFS/PhysFS device or under the SD-card asset root, neither of which
+    // SDL_GetBasePath() reports. The working directory is the user data folder, whose "assets" is the default SD root.
+    candidates.push_back(std::filesystem::path("romfs:/") / configuredShaderRoot / shaderName);
+
+    std::error_code workingDirectoryError;
+    const std::filesystem::path workingDirectory = std::filesystem::current_path(workingDirectoryError);
+
+    if (!workingDirectoryError)
+    {
+        candidates.push_back(workingDirectory / configuredShaderRoot / shaderName);
+        candidates.push_back(workingDirectory / "assets" / configuredShaderRoot / shaderName);
+    }
+
+    std::error_code existsError;
+
+    for (const std::filesystem::path &candidate : candidates)
+    {
+        if (std::filesystem::exists(candidate, existsError))
+        {
+            return candidate;
+        }
+    }
+
+    return candidates.empty() ? configuredShaderRoot / shaderName : candidates.front();
 }
 
 std::vector<uint8_t> readBinaryFile(const std::filesystem::path &path)
