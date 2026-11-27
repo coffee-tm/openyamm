@@ -4,14 +4,17 @@ name: Switch NRO
 # this file lives on main so the workflow_dispatch button is available.
 #
 # The official devkitA64 Docker image already has the toolchain, libnx, mesa,
-# physfs, freetype and ffmpeg portlibs. Two pieces need workarounds in CI
+# physfs, freetype and ffmpeg portlibs. Several pieces need workarounds in CI
 # (the switch/homebrew branch has never actually been compiled by its author):
 #   * switch-sdl3 is not in the image and devkitPro's pacman repo is
 #     Cloudflare-blocked -> cross-compile devkitPro/SDL @ switch-sdl-3.4 from
 #     GitHub and install it into the portlibs prefix.
 #   * the host-side upstream SDL3 needs SDL_UNIX_CONSOLE_BUILD=ON (no X11);
-#     CMake 3.31's FindPkgConfig needs PKG_CONFIG_VERSION as a cache var;
-#     bx's platform.h needs a GCC-15 / Switch platform fix.
+#     CMake 3.31's FindPkgConfig needs PKG_CONFIG_VERSION as a cache var.
+#   * bx/bgfx assume a full POSIX libc. devkitPro's newlib does not expose
+#     dlfcn.h, popen/pclose, fseeko/ftello, strdup/strnlen or posix_memalign,
+#     and bx has no __SWITCH__ platform probe. A CI-only compat shim plus a
+#     handful of source patches make the upstream sources build for libnx.
 # All source patches touch only the CI working copy; none are committed back.
 
 on:
@@ -139,7 +142,88 @@ jobs:
           export PATH="$DEVKITPRO/tools/bin:$DEVKITPRO/devkita64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH"
           ROOT="$PWD"
 
-          echo "==> [1/4] Configure Switch cross build"
+          echo "==> [1/5] Generate devkitPro newlib compat shim + hook bgfx target"
+          # devkitPro's newlib is not a full POSIX libc. Upstream bx/bimg/bgfx
+          # assume dlfcn.h, popen/pclose, fseeko/ftello, strdup/strnlen and
+          # posix_memalign exist on any POSIX-ish target. All of those sources
+          # are compiled into the single openyamm_bgfx target, so inject a shim
+          # into that target only (do NOT touch CMAKE_CXX_FLAGS: the toolchain
+          # puts -march/-mtp=soft/-fPIE in CMAKE_CXX_FLAGS_INIT).
+          mkdir -p "$ROOT/switch-compat"
+          cat > "$ROOT/switch-compat/switch-compat.h" <<'SHIM'
+          #ifndef OPENYAMM_SWITCH_COMPAT_H
+          #define OPENYAMM_SWITCH_COMPAT_H
+          /* CI-only compatibility shim for the devkitPro / libnx (newlib) target.
+           * Injected with -include into openyamm_bgfx only; never committed. */
+          #include <stdio.h>
+          #include <stdlib.h>
+          #include <string.h>
+          #include <stdint.h>
+          #include <malloc.h>
+
+          /* No process spawning in Switch homebrew: fail gracefully. */
+          static inline FILE* openyamm_popen_stub(const char* _c, const char* _m) {
+              (void)_c; (void)_m; return (FILE*)0;
+          }
+          static inline int openyamm_pclose_stub(FILE* _f) { (void)_f; return -1; }
+          #define popen  openyamm_popen_stub
+          #define pclose openyamm_pclose_stub
+
+          /* newlib has fseek/ftell (long is 64-bit on aarch64), not fseeko/ftello. */
+          #define fseeko fseek
+          #define ftello ftell
+
+          static inline char* openyamm_strdup_stub(const char* _s) {
+              if (!_s) return (char*)0;
+              size_t n = strlen(_s) + 1;
+              char* p = (char*)malloc(n);
+              if (p) memcpy(p, _s, n);
+              return p;
+          }
+          #define strdup openyamm_strdup_stub
+
+          static inline size_t openyamm_strnlen_stub(const char* _s, size_t _m) {
+              size_t n = 0;
+              while (n < _m && _s[n]) ++n;
+              return n;
+          }
+          #define strnlen openyamm_strnlen_stub
+
+          /* newlib's memalign() returns a pointer free()-able like malloc(). */
+          static inline int openyamm_posix_memalign_stub(void** _out, size_t _a, size_t _s) {
+              if (!_out) return 22;                 /* EINVAL */
+              if (_a < sizeof(void*)) _a = sizeof(void*);
+              void* p = memalign(_a, _s);
+              if (!p) return 12;                    /* ENOMEM */
+              *_out = p;
+              return 0;
+          }
+          #define posix_memalign openyamm_posix_memalign_stub
+          #endif /* OPENYAMM_SWITCH_COMPAT_H */
+          SHIM
+
+          # Hook -include into openyamm_bgfx by patching the project's own
+          # BgfxRuntime.cmake. This must happen BEFORE cmake configure, since
+          # CMake reads that file during configuration.
+          python3 - <<'PY'
+          import pathlib, sys
+          p = pathlib.Path("cmake/BgfxRuntime.cmake")
+          if not p.exists():
+              sys.exit("ERROR: cmake/BgfxRuntime.cmake not found")
+          s = p.read_text()
+          marker = "        target_include_directories(openyamm_bgfx"
+          if marker not in s:
+              sys.exit("ERROR: openyamm_bgfx target_include_directories not found")
+          inject = ("        # CI-only: devkitPro newlib compat shim (see switch-build.yml).\n"
+                    "        target_compile_options(openyamm_bgfx PRIVATE\n"
+                    "            -include \"${CMAKE_SOURCE_DIR}/switch-compat/switch-compat.h\")\n\n")
+          s = s.replace(marker, inject + marker, 1)
+          p.write_text(s)
+          print("hooked compat shim into openyamm_bgfx")
+          PY
+          grep -n 'switch-compat' cmake/BgfxRuntime.cmake
+
+          echo "==> [2/5] Configure Switch cross build"
           # CMake 3.31 FindPkgConfig stores PKG_CONFIG_VERSION in a function
           # scope; pkg_check_modules() expands elsewhere. A cache var is global.
           cmake -S . -B build-switch \
@@ -150,43 +234,77 @@ jobs:
             -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF \
             -DPKG_CONFIG_VERSION=1
 
-          echo "==> [2/4] Patch bx platform.h for GCC 15 / Switch"
-          # FetchContent has now populated build-switch/_deps/bx-src. bx has no
-          # __SWITCH__ probe, and its visionOS probe uses a clang-only builtin
-          # that GCC 15 cannot preprocess. Force the NX/POSIX platform (libnx
-          # supplies pthread) and neutralise that probe. CI working copy only.
+          echo "==> [3/5] Patch fetched bx/bgfx sources for devkitPro Switch"
+          # FetchContent populated build-switch/_deps/* during configure. These
+          # patches only touch the CI working copy, never the repository.
           python3 - <<'PY'
-          import pathlib, sys
+          import pathlib, re, sys
+
+          def must(ok, msg):
+              if not ok:
+                  sys.exit("ERROR: " + msg)
+
+          # --- bx platform.h: GCC 15 visionOS probe + force NX platform ---
           p = pathlib.Path("build-switch/_deps/bx-src/include/bx/platform.h")
-          if not p.exists():
-              sys.exit("ERROR: bx platform.h not found: " + str(p))
+          must(p.exists(), "bx platform.h not found: " + str(p))
           s = p.read_text()
           bad = "#elif defined(__has_builtin) && __has_builtin(__is_target_os) && __is_target_os(xros)"
-          if bad not in s:
-              sys.exit("ERROR: bx visionOS probe line not found (bx changed?)")
+          must(bad in s, "bx visionOS probe line not found (bx changed?)")
           s = s.replace(bad, "#elif 0  // visionOS probe disabled for GCC 15 (CI)", 1)
           marker = "#define BX_PLATFORM_POSIX (0"
-          if marker not in s:
-              sys.exit("ERROR: BX_PLATFORM_POSIX definition not found")
+          must(marker in s, "BX_PLATFORM_POSIX definition not found")
           inject = ("// devkitPro/libnx provides a POSIX pthread layer; bx has no\n"
                     "// __SWITCH__ probe, so force its NX platform here (CI).\n"
                     "#undef  BX_PLATFORM_NX\n"
                     "#define BX_PLATFORM_NX 1  // Nintendo Switch\n\n")
           s = s.replace(marker, inject + marker, 1)
           p.write_text(s)
-          print("patched bx platform.h")
+          print("patched bx platform.h (GCC15 probe + NX)")
+
+          # --- bx os.cpp: skip <dlfcn.h> on NX ---
+          # bx already stubs dlopen/dlclose/dlsym for BX_PLATFORM_NX, but its
+          # include block still pulls in <dlfcn.h>, which devkitPro newlib lacks.
+          p = pathlib.Path("build-switch/_deps/bx-src/src/os.cpp")
+          must(p.exists(), "bx os.cpp not found")
+          s = p.read_text()
+          m = re.search(r'(^[ \t]*#[ \t]*include[ \t]*<dlfcn\.h>[^\n]*$)', s, re.M)
+          must(m is not None, "os.cpp <dlfcn.h> include not found")
+          s = (s[:m.start()]
+               + "#if !BX_PLATFORM_NX  // CI: devkitPro newlib has no dlfcn.h\n"
+               + m.group(1)
+               + "\n#endif\n"
+               + s[m.end():])
+          p.write_text(s)
+          print("patched bx os.cpp (dlfcn.h guarded for NX)")
+
+          # --- bgfx EGL eglplatform.h: add a devkitPro Switch branch ---
+          p = pathlib.Path("build-switch/_deps/bgfx-src/3rdparty/khronos/EGL/eglplatform.h")
+          must(p.exists(), "bgfx eglplatform.h not found")
+          s = p.read_text()
+          marker = "#elif defined(__unix__)"
+          must(marker in s, "eglplatform.h __unix__ branch not found")
+          inject = ("#elif defined(__SWITCH__) || defined(__NX__) || defined(NINTENDO_SWITCH)\n"
+                    "/* devkitPro / libnx: switch-mesa EGL handles are opaque pointers. */\n"
+                    "typedef void             *EGLNativeDisplayType;\n"
+                    "typedef khronos_uintptr_t EGLNativePixmapType;\n"
+                    "typedef khronos_uintptr_t EGLNativeWindowType;\n\n")
+          s = s.replace(marker, inject + marker, 1)
+          p.write_text(s)
+          print("patched bgfx eglplatform.h (Switch native types)")
           PY
           grep -nE 'BX_PLATFORM_NX 1|visionOS probe disabled' \
             build-switch/_deps/bx-src/include/bx/platform.h
+          grep -nE 'defined\(__SWITCH__\)' \
+            build-switch/_deps/bgfx-src/3rdparty/khronos/EGL/eglplatform.h
 
-          echo "==> [3/4] Compile ESSL shaders"
+          echo "==> [4/5] Compile ESSL shaders"
           cmake --build build-switch --target openyamm_runtime_shaders --parallel
           shader_count=$(find build-switch/runtime/shaders/essl -maxdepth 1 \
             -name '*.bin' -type f 2>/dev/null | wc -l)
           echo "    $shader_count ESSL shaders"
           [ "$shader_count" -gt 0 ] || { echo "::error::No ESSL shaders produced"; exit 1; }
 
-          echo "==> [4/4] Build OpenYAMM.nro"
+          echo "==> [5/5] Build OpenYAMM.nro"
           cmake --build build-switch --target openyamm_switch_nro --parallel
           test -f build-switch/OpenYAMM.nro || { echo "::error::OpenYAMM.nro missing"; exit 1; }
           echo "==> Build OK: build-switch/OpenYAMM.nro"
