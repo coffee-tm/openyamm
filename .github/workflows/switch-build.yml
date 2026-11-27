@@ -2,8 +2,14 @@ name: Switch NRO
 
 # Manual Switch cross-build. The code is checked out from switch/homebrew;
 # this file lives on main so the workflow_dispatch button is available.
-# devkitPro's own domains are blocked by Cloudflare from the runner IP, so we
-# use the official prebuilt devkitA64 Docker image (toolchain + all portlibs).
+#
+# The official devkitA64 Docker image already has the toolchain, libnx, mesa,
+# physfs, freetype and ffmpeg portlibs. The only missing piece is switch-sdl3
+# (devkitPro's SDL3 fork with a Switch backend). Getting it is adaptive:
+#   Route A: install switch-sdl3 from devkitPro's pacman repo (runner IP may
+#            reach it even when a local CN IP is Cloudflare-blocked).
+#   Route B: cross-compile devkitPro/SDL @ switch-sdl-3.4 from GitHub and
+#            install it into the portlibs prefix (GitHub is always reachable).
 
 on:
   workflow_dispatch:
@@ -53,7 +59,8 @@ jobs:
         run: |
           apt-get update
           apt-get install -y --no-install-recommends \
-            cmake ninja-build make pkg-config zip libgl1-mesa-dev libx11-dev libxext-dev
+            cmake ninja-build make pkg-config zip git curl ca-certificates python3 \
+            libgl1-mesa-dev libx11-dev libxext-dev
 
       - name: Verify toolchain
         run: |
@@ -66,8 +73,80 @@ jobs:
           cmake --version | head -n 1
           echo "=== available Switch portlibs ==="
           dkp-pacman -Q 2>/dev/null | grep '^switch-' | sort || true
-          echo "=== pkg-config modules ==="
-          find "$DEVKITPRO/portlibs" -name '*.pc' 2>/dev/null | sed 's|.*/||' | sort | head -60
+
+      - name: Ensure SDL3 Switch portlib
+        run: |
+          . /opt/devkitpro/devkita64.sh
+          PCPATH="$DEVKITPRO/portlibs/switch/bin/aarch64-none-elf-pkg-config"
+          [ -x "$PCPATH" ] || PCPATH="$(command -v aarch64-none-elf-pkg-config)"
+
+          have_sdl3() { "$PCPATH" --exists sdl3 2>/dev/null; }
+
+          echo "=== devkitPro package-repo reachability on this runner ==="
+          for u in \
+            "https://pkg.devkitpro.org/" \
+            "https://pkg.devkitpro.org/packages/x86_64/dkp-libs.db" \
+            "https://apt.devkitpro.org/install-devkitpro-pacman"; do
+            code=$(curl -sS -L --max-time 20 -o /dev/null -w "%{http_code}" "$u" 2>/dev/null || echo "000")
+            echo "  $code  $u"
+          done
+          echo "=== Switch.cmake platform hints ==="
+          grep -iE 'NINTENDO_SWITCH|__SWITCH__|CMAKE_SYSTEM_NAME|LIBNX|TRY_COMPILE' \
+            "$DEVKITPRO/cmake/Switch.cmake" 2>/dev/null | head -20 || echo "  (no Switch.cmake)"
+
+          if have_sdl3; then
+            echo "sdl3 already present in the image"
+            "$PCPATH" --modversion sdl3
+            exit 0
+          fi
+
+          echo ""
+          echo "=== Route A: install switch-sdl3 from devkitPro pacman repo ==="
+          : > /tmp/pacman-sdl3.log
+          if timeout 150 dkp-pacman -Sy --noconfirm >>/tmp/pacman-sdl3.log 2>&1; then
+            echo "  pacman db sync OK"
+            timeout 240 dkp-pacman -S --noconfirm switch-sdl3 >>/tmp/pacman-sdl3.log 2>&1 || true
+          else
+            echo "  pacman db sync failed/timed out (repo likely blocked)"
+          fi
+          tail -n 25 /tmp/pacman-sdl3.log || true
+          if have_sdl3; then
+            echo "ROUTE_A_OK: switch-sdl3 installed via dkp-pacman"
+            "$PCPATH" --modversion sdl3
+            exit 0
+          fi
+          echo "  Route A did not yield sdl3. Falling back to source build."
+
+          echo ""
+          echo "=== Route B: cross-compile devkitPro/SDL @ switch-sdl-3.4 ==="
+          SDL_SRC="$RUNNER_TEMP/SDL"
+          SDL_BLD="$RUNNER_TEMP/SDL-build"
+          rm -rf "$SDL_SRC" "$SDL_BLD"
+          if ! git clone --depth 1 -b switch-sdl-3.4 https://github.com/devkitPro/SDL.git "$SDL_SRC"; then
+            echo "::error::Failed to clone devkitPro/SDL switch-sdl-3.4"
+            exit 1
+          fi
+          cmake -S "$SDL_SRC" -B "$SDL_BLD" -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
+            -DCMAKE_INSTALL_PREFIX="$DEVKITPRO/portlibs/switch" \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DNINTENDO_SWITCH=ON \
+            -DSDL_STATIC=ON -DSDL_SHARED=OFF \
+            -DSDL_TESTS=OFF -DSDL_TEST_LIBRARY=OFF \
+            -DSDL_INSTALL=ON -DSDL_INSTALL_TESTS=OFF \
+            -DSDL_X11=OFF -DSDL_WAYLAND=OFF 2>&1 | tail -n 40
+          cmake --build "$SDL_BLD" --parallel 4 2>&1 | tail -n 40
+          cmake --install "$SDL_BLD" 2>&1 | tail -n 30
+
+          echo "=== resulting SDL3 files in portlibs ==="
+          find "$DEVKITPRO/portlibs/switch" -iname 'sdl3*' 2>/dev/null | head -20
+          if have_sdl3; then
+            echo "ROUTE_B_OK: SDL3 built from source"
+            "$PCPATH" --modversion sdl3
+            exit 0
+          fi
+          echo "::error::Could not obtain sdl3 portlib by either route"
+          exit 1
 
       - name: Build NRO
         run: |
