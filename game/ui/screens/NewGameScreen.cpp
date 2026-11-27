@@ -1,6 +1,7 @@
 #include "game/ui/screens/NewGameScreen.h"
 
 #include "engine/Localization.h"
+#include "engine/PlatformServices.h"
 #include "engine/Utf8Text.h"
 
 #include "game/audio/GameAudioSystem.h"
@@ -2225,7 +2226,7 @@ void NewGameScreen::drawRulesPanel()
 
         if (hovered && leftMouseJustPressed())
         {
-            SDL_OpenURL(ruleset.guideUrl.c_str());
+            Engine::openExternalUrl(ruleset.guideUrl.c_str());
         }
     }
 

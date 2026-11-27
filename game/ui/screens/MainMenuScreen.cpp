@@ -1,6 +1,7 @@
 #include "game/ui/screens/MainMenuScreen.h"
 
 #include "engine/Localization.h"
+#include "engine/PlatformServices.h"
 #include "engine/Utf8Text.h"
 #include "game/app/GameUpdater.h"
 #include "game/data/GameDataRepository.h"
@@ -380,7 +381,7 @@ void MainMenuScreen::drawScreen(float deltaSeconds)
         drawDesign();
         if (button("github", designRect("CreditsProjectLink"), Engine::tr("OpenYAMM on GitHub"), "button_quiet"))
         {
-            SDL_OpenURL("https://github.com/pjasicek/OpenYAMM");
+            Engine::openExternalUrl("https://github.com/pjasicek/OpenYAMM");
         }
         if (action("CreditsBackButton") || (!modalOpen() && keyPressed(SDL_SCANCODE_ESCAPE)))
         {
@@ -751,7 +752,7 @@ void MainMenuScreen::offerUpdate()
             {
                 if (hasNotesPage && choice == 1)
                 {
-                    SDL_OpenURL(url.c_str());
+                    Engine::openExternalUrl(url.c_str());
                     return;
                 }
                 if (choice != (hasNotesPage ? 2 : 1))

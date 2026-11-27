@@ -179,6 +179,14 @@ bool modifiedContentComplete(const std::filesystem::path &assetRoot)
 ContentSetupResult runContentSetup(const std::string &updateChannelUrl, const std::filesystem::path &assetRoot,
                                    const std::string &languageId)
 {
+#if defined(OPENYAMM_SWITCH)
+    (void)updateChannelUrl;
+    (void)assetRoot;
+    (void)languageId;
+    std::cerr << "Content setup is unavailable in the Switch build; stage assets in ROMFS or on the SD card.\n";
+    return ContentSetupResult::Quit;
+#endif
+
     const std::string intro = setupIntro(assetRoot, languageId);
 
     std::unique_ptr<GameUpdater> pUpdater = GameUpdater::create(updateChannelUrl, false, languageId);

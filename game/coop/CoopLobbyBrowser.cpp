@@ -10,6 +10,13 @@ void CoopLobbyBrowser::refresh(uint16_t port, const std::string &lobbyAddress, s
     m_pLobby.reset();
     m_pSocket.reset();
 
+#if defined(OPENYAMM_SWITCH)
+    (void)port;
+    (void)lobbyAddress;
+    error = "network co-op is unavailable in the Switch build";
+    return;
+#endif
+
     if (!m_scanner.probe(port))
     {
         error = "could not open a socket to scan the local network";
@@ -62,7 +69,9 @@ void CoopLobbyBrowser::refresh(uint16_t port, const std::string &lobbyAddress, s
 
 void CoopLobbyBrowser::update()
 {
+#if !defined(OPENYAMM_SWITCH)
     m_scanner.service();
+#endif
 
     if (m_pSocket && m_pLobby)
     {

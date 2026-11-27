@@ -355,7 +355,13 @@ private:
 std::unique_ptr<GameUpdater> GameUpdater::create(const std::string &baseUrl, bool keepModifiedPacks,
                                                  const std::string &languageId)
 {
-#if defined(__ANDROID__)
+#if defined(OPENYAMM_SWITCH)
+    // Homebrew builds carry their content in the NRO or on the SD card; there is no self-updater.
+    (void)baseUrl;
+    (void)keepModifiedPacks;
+    (void)languageId;
+    return nullptr;
+#elif defined(__ANDROID__)
     // Development APKs bundle their content and take no updates; an APK installs its packs itself.
     (void)keepModifiedPacks;
     (void)languageId;
@@ -368,6 +374,12 @@ std::unique_ptr<GameUpdater> GameUpdater::create(const std::string &baseUrl, boo
 
 int runHeadlessUpdate(const std::string &baseUrl, bool keepModifiedPacks, std::ostream &log)
 {
+#if defined(OPENYAMM_SWITCH)
+    (void)baseUrl;
+    (void)keepModifiedPacks;
+    log << "Update: headless updates are unavailable in the Switch build\n";
+    return 2;
+#else
     std::unique_ptr<InstallationUpdater> updater = createInstallationUpdater(baseUrl, keepModifiedPacks);
 
     if (!updater)
@@ -415,5 +427,6 @@ int runHeadlessUpdate(const std::string &baseUrl, bool keepModifiedPacks, std::o
     log << (status.contentOnly ? "Update: the content of OpenYAMM " + status.release + " is installed\n"
                                : "Update: OpenYAMM " + status.release + " is now current\n");
     return 0;
+#endif
 }
 }

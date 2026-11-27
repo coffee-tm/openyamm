@@ -1,11 +1,14 @@
 #include "engine/net/EnetTransport.h"
 
+#if !defined(OPENYAMM_SWITCH)
 #include <enet/enet.h>
+#endif
 
 #include <atomic>
 #include <chrono>
 #include <cstdlib>
 
+#if !defined(OPENYAMM_SWITCH)
 namespace OpenYAMM::Engine
 {
 namespace
@@ -446,3 +449,94 @@ NetPeerStats EnetTransport::peerStats(NetPeerId peer) const
     return stats;
 }
 }
+#else
+namespace OpenYAMM::Engine
+{
+NetLibrary::NetLibrary() = default;
+NetLibrary::~NetLibrary() = default;
+
+uint32_t netNowMilliseconds()
+{
+    const std::chrono::steady_clock::duration sinceStart = std::chrono::steady_clock::now().time_since_epoch();
+    return uint32_t(std::chrono::duration_cast<std::chrono::milliseconds>(sinceStart).count());
+}
+
+NetAddress localAddressTowards(const NetAddress &)
+{
+    return {};
+}
+
+std::string toString(const NetAddress &address)
+{
+    return std::to_string(address.host) + ":" + std::to_string(address.port);
+}
+
+std::optional<NetAddress> parseNetAddress(const std::string &)
+{
+    return std::nullopt;
+}
+
+EnetTransport::EnetTransport() = default;
+EnetTransport::~EnetTransport() = default;
+
+bool EnetTransport::open(uint16_t, size_t)
+{
+    return false;
+}
+
+void EnetTransport::close()
+{
+}
+
+bool EnetTransport::isOpen() const
+{
+    return false;
+}
+
+NetPeerId EnetTransport::connect(const NetAddress &)
+{
+    return InvalidNetPeer;
+}
+
+uint16_t EnetTransport::localPort() const
+{
+    return 0;
+}
+
+NetAddress EnetTransport::peerAddress(NetPeerId) const
+{
+    return {};
+}
+
+void EnetTransport::sendDatagram(const NetAddress &, std::span<const uint8_t>)
+{
+}
+
+void EnetTransport::setDatagramHandler(DatagramHandler)
+{
+}
+
+void EnetTransport::service(uint32_t)
+{
+}
+
+bool EnetTransport::pollEvent(NetEvent &)
+{
+    return false;
+}
+
+bool EnetTransport::send(NetPeerId, uint8_t, NetDelivery, std::span<const uint8_t>)
+{
+    return false;
+}
+
+void EnetTransport::disconnect(NetPeerId)
+{
+}
+
+NetPeerStats EnetTransport::peerStats(NetPeerId) const
+{
+    return {};
+}
+}
+#endif

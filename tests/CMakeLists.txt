@@ -89,6 +89,7 @@ add_executable(openyamm_unit_tests
     PotionUpkeepTests.cpp
     GameplayRuleRegressionTests.cpp
     GameInputSystemTests.cpp
+    GamepadInputTests.cpp
     GlUniformCacheTests.cpp
     HudDrawListTests.cpp
     HudReadingTests.cpp
@@ -220,6 +221,7 @@ add_executable(openyamm_unit_tests
     GameplayScreenRuntimeTestStubs.cpp
     ../game/app/GameSettings.cpp
     ../game/app/GameInputSystem.cpp
+    ../game/app/GamepadInput.cpp
     ../game/app/KeyboardBindings.cpp
     ../game/app/ScreenManager.cpp
     ../engine/AudioSystem.cpp

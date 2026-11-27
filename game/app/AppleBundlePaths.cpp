@@ -135,6 +135,11 @@ std::string applePackageVersion()
 
 std::optional<int> startInstalledApplePackage(int argc, char **argv)
 {
+#if defined(OPENYAMM_SWITCH)
+    (void)argc;
+    (void)argv;
+    return std::nullopt;
+#else
     std::optional<Engine::AppInstallation> installation = applePackageInstallation();
 
     if (!installation || !installation->currentVersion())
@@ -156,5 +161,6 @@ std::optional<int> startInstalledApplePackage(int argc, char **argv)
     std::cerr << message << '\n';
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "OpenYAMM", message.c_str(), nullptr);
     return 1;
+#endif
 }
 }

@@ -6,3 +6,6 @@
 
 # Unified patch context prefixes precede the upstream file's indentation.
 *.patch whitespace=-space-before-tab
+
+# Shell scripts run on Linux devkitPro hosts.
+*.sh text eol=lf

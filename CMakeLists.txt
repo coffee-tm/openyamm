@@ -24,6 +24,10 @@ if (OPENYAMM_SWITCH)
     set(OPENYAMM_BUILD_TESTS OFF)
     set(OPENYAMM_SWITCH_ROMFS_DIR "" CACHE PATH
         "Optional directory embedded as ROMFS in the Switch NRO; when set, assets are read from romfs:/.")
+    set(OPENYAMM_SWITCH_ASSET_ROOT "" CACHE STRING
+        "Runtime asset root for the Switch build. Empty uses romfs:/ when ROMFS is embedded, otherwise <user-data>/assets.")
+    set(OPENYAMM_SWITCH_USER_DATA_DIR "sdmc:/switch/openyamm" CACHE STRING
+        "Directory on the Switch SD card used for settings.ini, saves and screenshots.")
 endif()
 
 if (CMAKE_VERSION VERSION_GREATER_EQUAL 4.0 AND NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)

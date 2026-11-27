@@ -17,6 +17,7 @@ add_library(openyamm_game STATIC
     render/SkyRenderer.cpp
     app/ScreenManager.cpp
     app/GameInputSystem.cpp
+    app/GamepadInput.cpp
     app/ProfilingControl.cpp
     arcomage/ArcomageAi.cpp
     arcomage/ArcomageLoader.cpp
@@ -608,6 +609,21 @@ if (OPENYAMM_SWITCH)
     target_compile_features(openyamm_switch PRIVATE cxx_std_20)
     set_target_properties(openyamm_switch PROPERTIES OUTPUT_NAME "openyamm")
 
+    target_compile_definitions(openyamm_switch PRIVATE
+        "OPENYAMM_SWITCH_USER_DATA_DIR=\"${OPENYAMM_SWITCH_USER_DATA_DIR}\""
+    )
+
+    set(OPENYAMM_SWITCH_EFFECTIVE_ASSET_ROOT "${OPENYAMM_SWITCH_ASSET_ROOT}")
+    if (NOT OPENYAMM_SWITCH_EFFECTIVE_ASSET_ROOT AND OPENYAMM_SWITCH_ROMFS_DIR)
+        set(OPENYAMM_SWITCH_EFFECTIVE_ASSET_ROOT "romfs:/")
+    endif()
+
+    if (OPENYAMM_SWITCH_EFFECTIVE_ASSET_ROOT)
+        target_compile_definitions(openyamm_switch PRIVATE
+            "OPENYAMM_SWITCH_ASSET_ROOT=\"${OPENYAMM_SWITCH_EFFECTIVE_ASSET_ROOT}\""
+        )
+    endif()
+
     set(OPENYAMM_SWITCH_NACP "${CMAKE_BINARY_DIR}/OpenYAMM.nacp")
     set(OPENYAMM_SWITCH_NRO "${CMAKE_BINARY_DIR}/OpenYAMM.nro")
 
@@ -625,10 +641,13 @@ if (OPENYAMM_SWITCH)
 
     if (OPENYAMM_SWITCH_ROMFS_DIR)
         list(APPEND OPENYAMM_SWITCH_NRO_FLAGS "--romfsdir=${OPENYAMM_SWITCH_ROMFS_DIR}")
-        target_compile_definitions(openyamm_switch PRIVATE
-            OPENYAMM_SWITCH_ROMFS=1
-            "OPENYAMM_SWITCH_ASSET_ROOT=\"romfs:/\""
-        )
+        target_compile_definitions(openyamm_switch PRIVATE OPENYAMM_SWITCH_ROMFS=1)
+
+        if (NOT OPENYAMM_SWITCH_EFFECTIVE_ASSET_ROOT MATCHES "^romfs:")
+            message(WARNING
+                "Switch ROMFS is embedded but OPENYAMM_SWITCH_ASSET_ROOT is '${OPENYAMM_SWITCH_EFFECTIVE_ASSET_ROOT}'. "
+                "The NRO will carry assets that the game may not read.")
+        endif()
     endif()
 
     add_custom_command(

@@ -45,6 +45,16 @@ namespace
 // Written to the user data folder, next to settings.ini and the saves.
 constexpr const char *LogFileName = "openyamm.log";
 
+#if defined(OPENYAMM_SWITCH)
+// libnx virtual mounts are absolute paths for the console even though the host's std::filesystem treats them as
+// relative. Rewriting them with absolute() would turn "romfs:/" into "<cwd>/romfs:/" and break asset lookup.
+bool isSwitchVirtualPath(const std::filesystem::path &path)
+{
+    const std::string value = path.generic_string();
+    return value.starts_with("romfs:/") || value.starts_with("sdmc:/");
+}
+#endif
+
 void setEnvironmentVariable(const char *pName, const char *pValue)
 {
 #if defined(_WIN32)
@@ -180,9 +190,19 @@ bool parseCommonArguments(
             }
 
             // Several may be given: the first is found first.
-            std::error_code absoluteError;
-            config.installedContent.extraMountRoots.push_back(
-                std::filesystem::absolute(argv[argumentIndex + 1], absoluteError));
+#if defined(OPENYAMM_SWITCH)
+            const std::filesystem::path extraRoot(argv[argumentIndex + 1]);
+            if (isSwitchVirtualPath(extraRoot))
+            {
+                config.installedContent.extraMountRoots.push_back(extraRoot);
+            }
+            else
+#endif
+            {
+                std::error_code absoluteError;
+                config.installedContent.extraMountRoots.push_back(
+                    std::filesystem::absolute(argv[argumentIndex + 1], absoluteError));
+            }
             ++argumentIndex;
             continue;
         }
@@ -466,9 +486,16 @@ int runGame(int argc, char **argv, OpenYAMM::Engine::LogFile &logFile)
 
     if (assetRootArgumentProvided)
     {
-        // Relative to the folder the game was started from, not the user data folder entered below.
-        std::error_code error;
-        config.assetRoot = std::filesystem::absolute(config.assetRoot, error).string();
+#if defined(OPENYAMM_SWITCH)
+        if (!isSwitchVirtualPath(config.assetRoot))
+        {
+#endif
+            // Relative to the folder the game was started from, not the user data folder entered below.
+            std::error_code error;
+            config.assetRoot = std::filesystem::absolute(config.assetRoot, error).string();
+#if defined(OPENYAMM_SWITCH)
+        }
+#endif
     }
 #if !defined(__ANDROID__)
     else if (OpenYAMM::Engine::isReleaseInstallation(installRoot))

@@ -1,6 +1,7 @@
 #include "game/ui/screens/LoadGameScreen.h"
 
 #include "engine/Localization.h"
+#include "engine/PlatformServices.h"
 #include "engine/Utf8Text.h"
 #include "game/content/RulesetDefinition.h"
 #include "game/maps/SaveGame.h"
@@ -1487,7 +1488,7 @@ void LoadGameScreen::drawScreen(float deltaSeconds)
         if (action(prefix + "OpenFolderButton"))
         {
             std::error_code error;
-            SDL_OpenURL(Engine::folderUrl(std::filesystem::current_path(error)).c_str());
+            Engine::openExternalUrl(Engine::folderUrl(std::filesystem::current_path(error)).c_str());
         }
         finishImportSaves();
     }

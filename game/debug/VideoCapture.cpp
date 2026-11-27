@@ -27,7 +27,7 @@ int closePipe(FILE *pPipe)
 {
     return _pclose(pPipe);
 }
-#elif !defined(__ANDROID__)
+#elif !defined(__ANDROID__) && !defined(OPENYAMM_SWITCH)
 FILE *openPipe(const std::string &command)
 {
     return popen(command.c_str(), "w");
@@ -50,7 +50,7 @@ VideoCapture::~VideoCapture()
 
 bool VideoCapture::start(const std::string &outputPath, uint32_t framesPerSecond, std::string &error)
 {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(OPENYAMM_SWITCH)
     (void)outputPath;
     (void)framesPerSecond;
     error = "video capture is desktop only";
@@ -128,7 +128,7 @@ std::string VideoCapture::frameToken(uint64_t frameIndex) const
 
 bool VideoCapture::openEncoder(uint32_t width, uint32_t height)
 {
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(OPENYAMM_SWITCH)
     (void)width;
     (void)height;
     return false;
@@ -155,7 +155,7 @@ bool VideoCapture::openEncoder(uint32_t width, uint32_t height)
 
 void VideoCapture::finish()
 {
-#if !defined(__ANDROID__)
+#if !defined(__ANDROID__) && !defined(OPENYAMM_SWITCH)
     if (m_pEncoder != nullptr)
     {
         const int result = closePipe(m_pEncoder);

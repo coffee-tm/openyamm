@@ -2064,6 +2064,44 @@ std::optional<GameSettings> parseGameSettingsDocument(const IniDocument &documen
         }
     }
 
+    if (const std::optional<std::string> value = getIniValue(document, "gamepad", "enabled"))
+    {
+        parseBoolValue(*value, settings.gamepad.enabled);
+    }
+
+    if (const std::optional<std::string> value = getIniValue(document, "gamepad", "deadzone"))
+    {
+        float parsed = settings.gamepad.deadzone;
+
+        if (parseFloatValue(*value, parsed))
+        {
+            settings.gamepad.deadzone = std::clamp(parsed, 0.0f, 0.95f);
+        }
+    }
+
+    if (const std::optional<std::string> value = getIniValue(document, "gamepad", "look_sensitivity"))
+    {
+        float parsed = settings.gamepad.lookSensitivity;
+
+        if (parseFloatValue(*value, parsed))
+        {
+            settings.gamepad.lookSensitivity = std::clamp(parsed, 0.0f, 10.0f);
+        }
+    }
+
+    if (const std::optional<std::string> value = getIniValue(document, "gamepad", "invert_look_y"))
+    {
+        parseBoolValue(*value, settings.gamepad.invertLookY);
+    }
+
+    for (const GamepadButtonDefinition &definition : gamepadButtonDefinitions())
+    {
+        if (const std::optional<std::string> value = getIniValue(document, "gamepad", std::string(definition.iniKey)))
+        {
+            settings.gamepad.setAction(definition.button, parseGamepadActionName(trimCopy(*value)));
+        }
+    }
+
     for (const KeyboardBindingDefinition &definition : keyboardBindingDefinitions())
     {
         std::optional<std::string> value = getIniValue(document, "input", std::string(definition.iniKey));
@@ -2815,6 +2853,17 @@ std::vector<SettingsEntry> serializeGameSettings(const GameSettings &settings)
     for (const KeyboardBindingDefinition &definition : keyboardBindingDefinitions())
     {
         serializer.add(definition.iniKey, inputBindingName(settings.keyboard.binding(definition.action)));
+    }
+
+    serializer.section("gamepad");
+    serializer.add("enabled", boolValue(settings.gamepad.enabled));
+    serializer.add("deadzone", std::clamp(settings.gamepad.deadzone, 0.0f, 0.95f));
+    serializer.add("look_sensitivity", std::clamp(settings.gamepad.lookSensitivity, 0.0f, 10.0f));
+    serializer.add("invert_look_y", boolValue(settings.gamepad.invertLookY));
+
+    for (const GamepadButtonDefinition &definition : gamepadButtonDefinitions())
+    {
+        serializer.add(definition.iniKey, gamepadActionName(settings.gamepad.action(definition.button)));
     }
 
     serializer.section("video");

@@ -5,6 +5,7 @@ add_library(openyamm_engine
     AssetPaths.cpp
     UserDataPaths.cpp
     LogFile.cpp
+    PlatformServices.cpp
     update/AppInstallation.cpp
     update/AppUpdater.cpp
     update/HttpTransport.cpp

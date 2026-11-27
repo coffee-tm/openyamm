@@ -355,6 +355,14 @@ CoopSession::~CoopSession() = default;
 
 bool CoopSession::host(uint16_t port, std::string &error, const std::string &name, const std::string &lobbyAddress)
 {
+#if defined(OPENYAMM_SWITCH)
+    (void)port;
+    (void)name;
+    (void)lobbyAddress;
+    error = "network co-op is unavailable in the Switch build";
+    return false;
+#endif
+
     if (m_role != Role::None)
     {
         error = "a co-op session is already running";
@@ -488,6 +496,14 @@ bool CoopSession::joinByCode(
     std::string &error,
     bool relayOnly)
 {
+#if defined(OPENYAMM_SWITCH)
+    (void)lobbyAddress;
+    (void)code;
+    (void)relayOnly;
+    error = "network co-op is unavailable in the Switch build";
+    return false;
+#endif
+
     if (m_role != Role::None)
     {
         error = "a co-op session is already running";
@@ -557,6 +573,12 @@ void CoopSession::hostOn(std::unique_ptr<Engine::INetTransport> pTransport)
 
 bool CoopSession::join(const std::string &address, std::string &error)
 {
+#if defined(OPENYAMM_SWITCH)
+    (void)address;
+    error = "network co-op is unavailable in the Switch build";
+    return false;
+#endif
+
     if (m_role != Role::None)
     {
         error = "a co-op session is already running";

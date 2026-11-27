@@ -1,5 +1,6 @@
 #include "engine/Utf8Text.h"
 #include "engine/Localization.h"
+#include "engine/PlatformServices.h"
 #include "game/gameplay/GameplayOverlayInputController.h"
 
 #include "engine/Utf8Text.h"
@@ -3233,7 +3234,7 @@ bool GameplayOverlayInputController::handleJournalOverlayInput(
             case GameplayJournalPointerTargetType::ProgressGuide:
                 if (!view.rulesetGuideUrl().empty())
                 {
-                    SDL_OpenURL(view.rulesetGuideUrl().c_str());
+                    Engine::openExternalUrl(view.rulesetGuideUrl().c_str());
                 }
 
                 break;
