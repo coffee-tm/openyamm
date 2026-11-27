@@ -167,6 +167,30 @@ jobs:
       - name: Build NRO
         run: |
           . /opt/devkitpro/devkita64.sh
+          # CMake 3.31's FindPkgConfig sets PKG_CONFIG_VERSION as a plain variable
+          # inside openyamm_switch_pkg_config() (a function). pkg_check_modules()
+          # expands in a DIFFERENT function, where that variable is out of scope and
+          # empty -> "if(... LESS  OR ...): Unknown arguments specified".
+          # Seed it as a CACHE variable (globally visible) on the Switch configure.
+          # This edits ONLY the CI working copy; nothing is committed back.
+          python3 - <<'PY'
+          p = "switch/validate_switch_build.sh"
+          with open(p, encoding="utf-8", newline="") as f:
+              lines = f.readlines()
+          out, done = [], False
+          for ln in lines:
+              out.append(ln)
+              if not done and "-DOPENYAMM_SWITCH=ON" in ln:
+                  nl = "\r\n" if ln.endswith("\r\n") else "\n"
+                  out.append("    -DPKG_CONFIG_VERSION=1 \\" + nl)
+                  done = True
+          if not done:
+              raise SystemExit("ERROR: Switch configure anchor not found")
+          with open(p, "w", encoding="utf-8", newline="") as f:
+              f.writelines(out)
+          print("CI patch applied: -DPKG_CONFIG_VERSION=1")
+          PY
+          grep -n "PKG_CONFIG_VERSION" switch/validate_switch_build.sh
           # validate_switch_build.sh exports its own PATH (incl. portlibs/switch/bin)
           # and checks every required pkg-config module itself. Invoke via bash:
           # sparse-checkout does not preserve the executable bit on the script.
