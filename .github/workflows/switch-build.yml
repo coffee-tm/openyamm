@@ -69,8 +69,9 @@ jobs:
         run: |
           . /opt/devkitpro/devkita64.sh
           # validate_switch_build.sh exports its own PATH (incl. portlibs/switch/bin)
-          # and checks every required pkg-config module itself.
-          ./switch/validate_switch_build.sh
+          # and checks every required pkg-config module itself. Invoke via bash:
+          # sparse-checkout does not preserve the executable bit on the script.
+          bash switch/validate_switch_build.sh
 
       - name: Package artifact
         run: |
