@@ -291,9 +291,28 @@ jobs:
           s = s.replace(marker, inject + marker, 1)
           p.write_text(s)
           print("patched bgfx eglplatform.h (Switch native types)")
+
+          # --- Lua luaconf.h: use 64-bit 'long' instead of 'long long' ---
+          # Lua 5.4 uses LLONG_MAX as a proxy for C99 'long long' support.
+          # devkitPro newlib does not expose LLONG_MAX here, so luaconf.h hits
+          # its "Compiler does not support 'long long'" #error and lua_Integer
+          # is never defined, which cascades into every lua.h/lauxlib.h error
+          # in the project's scripting code. On aarch64 LP64, 'long' is 64-bit,
+          # so LUA_INT_LONG keeps full 64-bit Lua integers.
+          p = pathlib.Path("build-switch/_deps/lua-src/src/luaconf.h")
+          must(p.exists(), "lua luaconf.h not found")
+          s = p.read_text()
+          s2, n = re.subn(r'(#define\s+LUA_INT_DEFAULT\s+)LUA_INT_LONGLONG',
+                          r'\1LUA_INT_LONG  // CI: devkitPro newlib has no LLONG_MAX',
+                          s, count=1)
+          must(n == 1, "luaconf.h LUA_INT_DEFAULT line not found")
+          p.write_text(s2)
+          print("patched lua luaconf.h (64-bit long integers)")
           PY
           grep -nE 'BX_PLATFORM_NX 1|visionOS probe disabled' \
             build-switch/_deps/bx-src/include/bx/platform.h
+          grep -nE 'LUA_INT_DEFAULT' \
+            build-switch/_deps/lua-src/src/luaconf.h
           grep -nE 'defined\(__SWITCH__\)' \
             build-switch/_deps/bgfx-src/3rdparty/khronos/EGL/eglplatform.h
 
