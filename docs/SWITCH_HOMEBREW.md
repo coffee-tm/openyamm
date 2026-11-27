@@ -1,5 +1,8 @@
 # Nintendo Switch homebrew port
 
+See the [docs index](README.md) for navigation, and [BUILD_SWITCH.zh-CN.md](BUILD_SWITCH.zh-CN.md) for the
+step-by-step build guide.
+
 This branch carries the OpenYAMM Switch homebrew work. It is for research and personal use.
 The source now contains the platform skeleton, `.nro` packaging, asset mounting and SDL gamepad
 mapping, but no devkitA64 build or console test has been performed in this workspace.
@@ -40,9 +43,6 @@ Base commit: `77fa3d8` (upstream `pjasicek/openyamm` main).
 - Audio output, suspend/resume and docked/handheld resolution switching.
 
 ## Prerequisites
-
-Step-by-step build instructions, including Windows/MSYS2 and troubleshooting, are in
-[BUILD_SWITCH.zh-CN.md](BUILD_SWITCH.zh-CN.md) (Chinese).
 
 Install devkitPro with at least:
 

@@ -1,5 +1,7 @@
 # OpenYAMM Nintendo Switch 版编译指南
 
+> 文档索引见 [README.md](README.md)。只想尽快编出 `.nro` 的话，直接跳到[第 3 节](#3-一键编译推荐)。
+
 本指南对应 `switch/homebrew` 分支，目标产物是在 Switch 自制系统（Atmosphère + homebrew menu）上运行的
 `OpenYAMM.nro`。编译在 PC 上交叉完成，不需要 Switch 参与。
 
