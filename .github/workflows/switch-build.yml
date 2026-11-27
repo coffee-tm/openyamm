@@ -63,17 +63,13 @@ jobs:
           echo "DEVKITPRO=$DEVKITPRO"
           aarch64-none-elf-g++ --version | head -n 1
           which nacptool elf2nro
-          for module in sdl3 physfs freetype2 libavformat libavcodec; do
-            aarch64-none-elf-pkg-config --exists "$module" || {
-              echo "::error::Missing Switch portlib: $module"
-              exit 1
-            }
-          done
           cmake --version | head -n 1
 
       - name: Build NRO
         run: |
           . /opt/devkitpro/devkita64.sh
+          # validate_switch_build.sh exports its own PATH (incl. portlibs/switch/bin)
+          # and checks every required pkg-config module itself.
           ./switch/validate_switch_build.sh
 
       - name: Package artifact
