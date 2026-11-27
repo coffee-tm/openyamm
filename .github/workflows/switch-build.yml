@@ -64,6 +64,10 @@ jobs:
           aarch64-none-elf-g++ --version | head -n 1
           which nacptool elf2nro
           cmake --version | head -n 1
+          echo "=== available Switch portlibs ==="
+          dkp-pacman -Q 2>/dev/null | grep '^switch-' | sort || true
+          echo "=== pkg-config modules ==="
+          find "$DEVKITPRO/portlibs" -name '*.pc' 2>/dev/null | sed 's|.*/||' | sort | head -60
 
       - name: Build NRO
         run: |
