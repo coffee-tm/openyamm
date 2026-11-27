@@ -22,6 +22,8 @@ if (OPENYAMM_SWITCH)
     add_compile_definitions(OPENYAMM_SWITCH=1)
     set(OPENYAMM_BUILD_DESKTOP_EXECUTABLE OFF)
     set(OPENYAMM_BUILD_TESTS OFF)
+    set(OPENYAMM_SWITCH_ROMFS_DIR "" CACHE PATH
+        "Optional directory embedded as ROMFS in the Switch NRO; when set, assets are read from romfs:/.")
 endif()
 
 if (CMAKE_VERSION VERSION_GREATER_EQUAL 4.0 AND NOT DEFINED CMAKE_POLICY_VERSION_MINIMUM)

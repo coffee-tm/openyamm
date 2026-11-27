@@ -449,7 +449,7 @@ set_property(
 
 if (NOT OPENYAMM_RUNTIME_SHADER_PATH STREQUAL "")
     set(openyammBgfxShaderDir "${OPENYAMM_RUNTIME_SHADER_PATH}")
-elseif (ANDROID OR WIN32 OR APPLE)
+elseif (ANDROID OR WIN32 OR APPLE OR OPENYAMM_SWITCH)
     set(openyammBgfxShaderDir "runtime/shaders")
 else()
     set(openyammBgfxShaderDir "${OPENYAMM_RUNTIME_SHADER_DIR}")
@@ -587,6 +587,59 @@ if (OPENYAMM_BUILD_DESKTOP_EXECUTABLE)
         target_link_options(openyamm PRIVATE -static-libstdc++ -static-libgcc)
         target_link_options(openyamm_launcher PRIVATE -static-libstdc++ -static-libgcc)
     endif()
+endif()
+
+if (OPENYAMM_SWITCH)
+    find_program(OPENYAMM_NACPTOOL nacptool REQUIRED PATHS "${DEVKITPRO}/tools/bin")
+    find_program(OPENYAMM_ELF2NRO elf2nro REQUIRED PATHS "${DEVKITPRO}/tools/bin")
+
+    add_executable(openyamm_switch
+        app/SwitchMain.cpp
+    )
+
+    target_link_libraries(openyamm_switch
+        PRIVATE
+            openyamm_game
+            SDL3::SDL3
+            nx
+    )
+
+    target_include_directories(openyamm_switch PRIVATE ${CMAKE_SOURCE_DIR})
+    target_compile_features(openyamm_switch PRIVATE cxx_std_20)
+    set_target_properties(openyamm_switch PROPERTIES OUTPUT_NAME "openyamm")
+
+    set(OPENYAMM_SWITCH_NACP "${CMAKE_BINARY_DIR}/OpenYAMM.nacp")
+    set(OPENYAMM_SWITCH_NRO "${CMAKE_BINARY_DIR}/OpenYAMM.nro")
+
+    add_custom_command(
+        OUTPUT "${OPENYAMM_SWITCH_NACP}"
+        COMMAND "${OPENYAMM_NACPTOOL}" --create "OpenYAMM" "OpenYAMM contributors" "${PROJECT_VERSION}" "${OPENYAMM_SWITCH_NACP}"
+        DEPENDS openyamm_switch
+        VERBATIM
+    )
+
+    set(OPENYAMM_SWITCH_NRO_FLAGS
+        "--icon=${CMAKE_SOURCE_DIR}/switch/icon.jpg"
+        "--nacp=${OPENYAMM_SWITCH_NACP}"
+    )
+
+    if (OPENYAMM_SWITCH_ROMFS_DIR)
+        list(APPEND OPENYAMM_SWITCH_NRO_FLAGS "--romfsdir=${OPENYAMM_SWITCH_ROMFS_DIR}")
+        target_compile_definitions(openyamm_switch PRIVATE
+            OPENYAMM_SWITCH_ROMFS=1
+            "OPENYAMM_SWITCH_ASSET_ROOT=\"romfs:/\""
+        )
+    endif()
+
+    add_custom_command(
+        OUTPUT "${OPENYAMM_SWITCH_NRO}"
+        COMMAND "${OPENYAMM_ELF2NRO}" "$<TARGET_FILE:openyamm_switch>" "${OPENYAMM_SWITCH_NRO}"
+            ${OPENYAMM_SWITCH_NRO_FLAGS}
+        DEPENDS openyamm_switch "${OPENYAMM_SWITCH_NACP}"
+        VERBATIM
+    )
+
+    add_custom_target(openyamm_switch_nro ALL DEPENDS "${OPENYAMM_SWITCH_NRO}")
 endif()
 
 # Host-side preparation shares the runtime format/filtering code, without requiring a graphics context.
