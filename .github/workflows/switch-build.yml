@@ -2,8 +2,8 @@ name: Switch NRO
 
 # Manual Switch cross-build. The code is checked out from switch/homebrew;
 # this file lives on main so the workflow_dispatch button is available.
-# devkitPro is installed by its official pacman bootstrap inside the runner;
-# no local devkitPro installation is needed.
+# devkitPro's own domains are blocked by Cloudflare from the runner IP, so we
+# use the official prebuilt devkitA64 Docker image (toolchain + all portlibs).
 
 on:
   workflow_dispatch:
@@ -15,6 +15,7 @@ jobs:
   nro:
     name: Build OpenYAMM.nro
     runs-on: ubuntu-24.04
+    container: devkitpro/devkita64:latest
     timeout-minutes: 180
 
     steps:
@@ -50,28 +51,15 @@ jobs:
 
       - name: Host build dependencies
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            cmake ninja-build make libgl1-mesa-dev libx11-dev libxext-dev
-
-      - name: Install devkitPro pacman
-        run: |
-          curl -fsSL https://apt.devkitpro.org/install-devkitpro-pacman -o /tmp/install-devkitpro-pacman
-          chmod +x /tmp/install-devkitpro-pacman
-          sudo /tmp/install-devkitpro-pacman
-
-      - name: Install Switch toolchain and portlibs
-        run: |
-          sudo dkp-pacman -Syu --noconfirm
-          sudo dkp-pacman -S --noconfirm \
-            switch-dev switch-sdl3 switch-mesa switch-physfs \
-            switch-freetype switch-ffmpeg switch-pkg-config
+          apt-get update
+          apt-get install -y --no-install-recommends \
+            cmake ninja-build make pkg-config zip libgl1-mesa-dev libx11-dev libxext-dev
 
       - name: Verify toolchain
         run: |
-          source /opt/devkitpro/devkita64.sh
           echo "DEVKITPRO=$DEVKITPRO"
           aarch64-none-elf-g++ --version | head -n 1
+          which nacptool elf2nro
           for module in sdl3 physfs freetype2 libavformat libavcodec; do
             aarch64-none-elf-pkg-config --exists "$module" || {
               echo "::error::Missing Switch portlib: $module"
@@ -82,7 +70,6 @@ jobs:
 
       - name: Build NRO
         run: |
-          source /opt/devkitpro/devkita64.sh
           ./switch/validate_switch_build.sh
 
       - name: Package artifact
