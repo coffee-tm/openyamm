@@ -57,6 +57,9 @@ jobs:
 
       - name: Verify toolchain
         run: |
+          # The image sets DEVKITPRO but leaves devkita64/bin out of PATH until
+          # the env script is sourced (same as a local install).
+          source /opt/devkitpro/devkita64.sh
           echo "DEVKITPRO=$DEVKITPRO"
           aarch64-none-elf-g++ --version | head -n 1
           which nacptool elf2nro
@@ -70,6 +73,7 @@ jobs:
 
       - name: Build NRO
         run: |
+          source /opt/devkitpro/devkita64.sh
           ./switch/validate_switch_build.sh
 
       - name: Package artifact
