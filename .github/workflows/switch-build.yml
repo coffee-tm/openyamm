@@ -119,22 +119,27 @@ jobs:
           fi
           echo "::error::Could not obtain sdl3 portlib"; exit 1
 
+      - name: Host shader compiler (clean environment)
+        run: |
+          # IMPORTANT: no devkita64.sh here. Sourcing it points PKG_CONFIG / the
+          # library search path at the Switch sysroot, so the host SDL3/bgfx
+          # configure cannot find desktop OpenGL/X11 and fails. This step must
+          # run in the container's plain host environment.
+          # SDL_UNIX_CONSOLE_BUILD=ON: shaderc is a console tool, no X11 needed.
+          cmake -S . -B build-switch-host \
+            -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF \
+            -DOPENYAMM_BUILD_TESTS=OFF \
+            -DSDL_UNIX_CONSOLE_BUILD=ON
+          cmake --build build-switch-host --target openyamm_shaderc --parallel
+          test -x build-switch-host/openyamm_shaderc
+
       - name: Build NRO
         run: |
           . /opt/devkitpro/devkita64.sh
           export PATH="$DEVKITPRO/tools/bin:$DEVKITPRO/devkita64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH"
           ROOT="$PWD"
 
-          echo "==> [1/5] Host shader compiler"
-          # Upstream SDL3 3.4.2 (host stage) aborts on Linux without X11/Wayland.
-          # The shaderc is a console tool, so SDL_UNIX_CONSOLE_BUILD=ON is correct.
-          cmake -S . -B build-switch-host \
-            -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF \
-            -DOPENYAMM_BUILD_TESTS=OFF \
-            -DSDL_UNIX_CONSOLE_BUILD=ON
-          cmake --build build-switch-host --target openyamm_shaderc --parallel
-
-          echo "==> [2/5] Configure Switch cross build"
+          echo "==> [1/4] Configure Switch cross build"
           # CMake 3.31 FindPkgConfig stores PKG_CONFIG_VERSION in a function
           # scope; pkg_check_modules() expands elsewhere. A cache var is global.
           cmake -S . -B build-switch \
@@ -145,7 +150,7 @@ jobs:
             -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF \
             -DPKG_CONFIG_VERSION=1
 
-          echo "==> [3/5] Patch bx platform.h for GCC 15 / Switch"
+          echo "==> [2/4] Patch bx platform.h for GCC 15 / Switch"
           # FetchContent has now populated build-switch/_deps/bx-src. bx has no
           # __SWITCH__ probe, and its visionOS probe uses a clang-only builtin
           # that GCC 15 cannot preprocess. Force the NX/POSIX platform (libnx
@@ -174,14 +179,14 @@ jobs:
           grep -nE 'BX_PLATFORM_NX 1|visionOS probe disabled' \
             build-switch/_deps/bx-src/include/bx/platform.h
 
-          echo "==> [4/5] Compile ESSL shaders"
+          echo "==> [3/4] Compile ESSL shaders"
           cmake --build build-switch --target openyamm_runtime_shaders --parallel
           shader_count=$(find build-switch/runtime/shaders/essl -maxdepth 1 \
             -name '*.bin' -type f 2>/dev/null | wc -l)
           echo "    $shader_count ESSL shaders"
           [ "$shader_count" -gt 0 ] || { echo "::error::No ESSL shaders produced"; exit 1; }
 
-          echo "==> [5/5] Build OpenYAMM.nro"
+          echo "==> [4/4] Build OpenYAMM.nro"
           cmake --build build-switch --target openyamm_switch_nro --parallel
           test -f build-switch/OpenYAMM.nro || { echo "::error::OpenYAMM.nro missing"; exit 1; }
           echo "==> Build OK: build-switch/OpenYAMM.nro"
