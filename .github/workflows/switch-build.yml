@@ -1,0 +1,78 @@
+name: Switch NRO
+
+# Manual Switch cross-build. The code is checked out from switch/homebrew;
+# this file lives on main so the workflow_dispatch button is available.
+# devkitPro is installed by its official pacman bootstrap inside the runner;
+# no local devkitPro installation is needed.
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  nro:
+    name: Build OpenYAMM.nro
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out switch/homebrew
+        uses: actions/checkout@v7
+        with:
+          ref: switch/homebrew
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Host build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake ninja-build make libgl1-mesa-dev libx11-dev libxext-dev
+
+      - name: Install devkitPro pacman
+        run: |
+          curl -fsSL https://apt.devkitpro.org/install-devkitpro-pacman -o /tmp/install-devkitpro-pacman
+          chmod +x /tmp/install-devkitpro-pacman
+          sudo /tmp/install-devkitpro-pacman
+
+      - name: Install Switch toolchain and portlibs
+        run: |
+          sudo dkp-pacman -Syu --noconfirm
+          sudo dkp-pacman -S --noconfirm \
+            switch-dev switch-sdl3 switch-mesa switch-physfs \
+            switch-freetype switch-ffmpeg switch-pkg-config
+
+      - name: Verify toolchain
+        run: |
+          source /opt/devkitpro/devkita64.sh
+          echo "DEVKITPRO=$DEVKITPRO"
+          aarch64-none-elf-g++ --version | head -n 1
+          for module in sdl3 physfs freetype2 libavformat libavcodec; do
+            aarch64-none-elf-pkg-config --exists "$module" || {
+              echo "::error::Missing Switch portlib: $module"
+              exit 1
+            }
+          done
+          cmake --version | head -n 1
+
+      - name: Build NRO
+        run: |
+          source /opt/devkitpro/devkita64.sh
+          ./switch/validate_switch_build.sh
+
+      - name: Package artifact
+        run: |
+          mkdir -p dist
+          cp build-switch/OpenYAMM.nro dist/
+          cp -a build-switch/runtime/shaders dist/
+          cd dist && zip -r ../openyamm-switch.zip .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: openyamm-switch
+          path: openyamm-switch.zip
+          if-no-files-found: error
+          retention-days: 30
