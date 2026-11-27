@@ -21,12 +21,21 @@ if [[ -z "${DEVKITPRO:-}" ]]; then
     exit 1
 fi
 
-export PATH="$DEVKITPRO/tools/bin:$DEVKITPRO/devkita64/bin:$PATH"
+export PATH="$DEVKITPRO/tools/bin:$DEVKITPRO/devkita64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH"
 
 need cmake
 need aarch64-none-elf-g++
+need aarch64-none-elf-pkg-config
 need nacptool
 need elf2nro
+
+for module in sdl3 physfs freetype2 libavformat libavcodec; do
+    if ! aarch64-none-elf-pkg-config --exists "$module"; then
+        echo "Missing Switch portlib pkg-config module: $module" >&2
+        echo "Install the devkitPro portlibs listed in docs/SWITCH_HOMEBREW.md." >&2
+        exit 1
+    fi
+done
 
 if [[ ! -f "$ROOT/switch/icon.jpg" ]]; then
     echo "Missing Switch icon: $ROOT/switch/icon.jpg" >&2
