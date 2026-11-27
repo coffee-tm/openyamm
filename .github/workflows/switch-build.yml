@@ -60,7 +60,9 @@ jobs:
           apt-get update
           apt-get install -y --no-install-recommends \
             cmake ninja-build make pkg-config zip git curl ca-certificates python3 \
-            libgl1-mesa-dev libx11-dev libxext-dev
+            libgl1-mesa-dev libx11-dev libxext-dev libxrandr-dev libxcursor-dev \
+            libxi-dev libxfixes-dev libxinerama-dev libxss-dev libxkbcommon-dev \
+            libwayland-dev
 
       - name: Verify toolchain
         run: |
@@ -147,6 +149,20 @@ jobs:
           fi
           echo "::error::Could not obtain sdl3 portlib by either route"
           exit 1
+
+      - name: Pre-seed host CMake cache (headless SDL3)
+        run: |
+          # The host stage of validate_switch_build.sh builds the shader compiler
+          # via FetchContent's upstream SDL3 3.4.2. SDL3 aborts on Linux without
+          # X11/Wayland unless SDL_UNIX_CONSOLE_BUILD=ON. The shaderc is a
+          # console-only tool with no windows, so seed the SAME build dir the
+          # script uses (build-switch-host) with that cache entry. The script's
+          # own `cmake -S -B build-switch-host` then reuses this cache.
+          cmake -S . -B build-switch-host \
+            -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF \
+            -DOPENYAMM_BUILD_TESTS=OFF \
+            -DSDL_UNIX_CONSOLE_BUILD=ON
+          grep -i SDL_UNIX_CONSOLE_BUILD build-switch-host/CMakeCache.txt
 
       - name: Build NRO
         run: |
