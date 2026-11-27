@@ -4,12 +4,15 @@ name: Switch NRO
 # this file lives on main so the workflow_dispatch button is available.
 #
 # The official devkitA64 Docker image already has the toolchain, libnx, mesa,
-# physfs, freetype and ffmpeg portlibs. The only missing piece is switch-sdl3
-# (devkitPro's SDL3 fork with a Switch backend). Getting it is adaptive:
-#   Route A: install switch-sdl3 from devkitPro's pacman repo (runner IP may
-#            reach it even when a local CN IP is Cloudflare-blocked).
-#   Route B: cross-compile devkitPro/SDL @ switch-sdl-3.4 from GitHub and
-#            install it into the portlibs prefix (GitHub is always reachable).
+# physfs, freetype and ffmpeg portlibs. Two pieces need workarounds in CI
+# (the switch/homebrew branch has never actually been compiled by its author):
+#   * switch-sdl3 is not in the image and devkitPro's pacman repo is
+#     Cloudflare-blocked -> cross-compile devkitPro/SDL @ switch-sdl-3.4 from
+#     GitHub and install it into the portlibs prefix.
+#   * the host-side upstream SDL3 needs SDL_UNIX_CONSOLE_BUILD=ON (no X11);
+#     CMake 3.31's FindPkgConfig needs PKG_CONFIG_VERSION as a cache var;
+#     bx's platform.h needs a GCC-15 / Switch platform fix.
+# All source patches touch only the CI working copy; none are committed back.
 
 on:
   workflow_dispatch:
@@ -66,68 +69,40 @@ jobs:
 
       - name: Verify toolchain
         run: |
-          # The image sets DEVKITPRO but leaves devkita64/bin out of PATH until
-          # the env script is sourced (same as a local install).
           . /opt/devkitpro/devkita64.sh
           echo "DEVKITPRO=$DEVKITPRO"
           aarch64-none-elf-g++ --version | head -n 1
           which nacptool elf2nro
           cmake --version | head -n 1
-          echo "=== available Switch portlibs ==="
-          dkp-pacman -Q 2>/dev/null | grep '^switch-' | sort || true
 
       - name: Ensure SDL3 Switch portlib
         run: |
           . /opt/devkitpro/devkita64.sh
           PCPATH="$DEVKITPRO/portlibs/switch/bin/aarch64-none-elf-pkg-config"
           [ -x "$PCPATH" ] || PCPATH="$(command -v aarch64-none-elf-pkg-config)"
-
           have_sdl3() { "$PCPATH" --exists sdl3 2>/dev/null; }
 
-          echo "=== devkitPro package-repo reachability on this runner ==="
-          for u in \
-            "https://pkg.devkitpro.org/" \
-            "https://pkg.devkitpro.org/packages/x86_64/dkp-libs.db" \
-            "https://apt.devkitpro.org/install-devkitpro-pacman"; do
-            code=$(curl -sS -L --max-time 20 -o /dev/null -w "%{http_code}" "$u" 2>/dev/null || echo "000")
-            echo "  $code  $u"
-          done
-          echo "=== Switch.cmake platform hints ==="
-          grep -iE 'NINTENDO_SWITCH|__SWITCH__|CMAKE_SYSTEM_NAME|LIBNX|TRY_COMPILE' \
-            "$DEVKITPRO/cmake/Switch.cmake" 2>/dev/null | head -20 || echo "  (no Switch.cmake)"
-
           if have_sdl3; then
-            echo "sdl3 already present in the image"
-            "$PCPATH" --modversion sdl3
-            exit 0
+            echo "sdl3 already present"; "$PCPATH" --modversion sdl3; exit 0
           fi
 
-          echo ""
-          echo "=== Route A: install switch-sdl3 from devkitPro pacman repo ==="
+          echo "=== Route A: devkitPro pacman repo (may be blocked) ==="
           : > /tmp/pacman-sdl3.log
           if timeout 150 dkp-pacman -Sy --noconfirm >>/tmp/pacman-sdl3.log 2>&1; then
-            echo "  pacman db sync OK"
             timeout 240 dkp-pacman -S --noconfirm switch-sdl3 >>/tmp/pacman-sdl3.log 2>&1 || true
-          else
-            echo "  pacman db sync failed/timed out (repo likely blocked)"
           fi
-          tail -n 25 /tmp/pacman-sdl3.log || true
+          tail -n 20 /tmp/pacman-sdl3.log || true
           if have_sdl3; then
-            echo "ROUTE_A_OK: switch-sdl3 installed via dkp-pacman"
-            "$PCPATH" --modversion sdl3
-            exit 0
+            echo "ROUTE_A_OK"; "$PCPATH" --modversion sdl3; exit 0
           fi
-          echo "  Route A did not yield sdl3. Falling back to source build."
+          echo "Route A unavailable. Cross-compiling SDL3 from GitHub."
 
-          echo ""
-          echo "=== Route B: cross-compile devkitPro/SDL @ switch-sdl-3.4 ==="
+          echo "=== Route B: devkitPro/SDL @ switch-sdl-3.4 ==="
           SDL_SRC="$RUNNER_TEMP/SDL"
           SDL_BLD="$RUNNER_TEMP/SDL-build"
           rm -rf "$SDL_SRC" "$SDL_BLD"
-          if ! git clone --depth 1 -b switch-sdl-3.4 https://github.com/devkitPro/SDL.git "$SDL_SRC"; then
-            echo "::error::Failed to clone devkitPro/SDL switch-sdl-3.4"
-            exit 1
-          fi
+          git clone --depth 1 -b switch-sdl-3.4 https://github.com/devkitPro/SDL.git "$SDL_SRC" || {
+            echo "::error::Failed to clone devkitPro/SDL switch-sdl-3.4"; exit 1; }
           cmake -S "$SDL_SRC" -B "$SDL_BLD" -G Ninja \
             -DCMAKE_TOOLCHAIN_FILE="$DEVKITPRO/cmake/Switch.cmake" \
             -DCMAKE_INSTALL_PREFIX="$DEVKITPRO/portlibs/switch" \
@@ -136,65 +111,80 @@ jobs:
             -DSDL_STATIC=ON -DSDL_SHARED=OFF \
             -DSDL_TESTS=OFF -DSDL_TEST_LIBRARY=OFF \
             -DSDL_INSTALL=ON -DSDL_INSTALL_TESTS=OFF \
-            -DSDL_X11=OFF -DSDL_WAYLAND=OFF 2>&1 | tail -n 40
-          cmake --build "$SDL_BLD" --parallel 4 2>&1 | tail -n 40
-          cmake --install "$SDL_BLD" 2>&1 | tail -n 30
-
-          echo "=== resulting SDL3 files in portlibs ==="
-          find "$DEVKITPRO/portlibs/switch" -iname 'sdl3*' 2>/dev/null | head -20
+            -DSDL_X11=OFF -DSDL_WAYLAND=OFF 2>&1 | tail -n 30
+          cmake --build "$SDL_BLD" --parallel 4 2>&1 | tail -n 30
+          cmake --install "$SDL_BLD" 2>&1 | tail -n 20
           if have_sdl3; then
-            echo "ROUTE_B_OK: SDL3 built from source"
-            "$PCPATH" --modversion sdl3
-            exit 0
+            echo "ROUTE_B_OK"; "$PCPATH" --modversion sdl3; exit 0
           fi
-          echo "::error::Could not obtain sdl3 portlib by either route"
-          exit 1
-
-      - name: Pre-seed host CMake cache (headless SDL3)
-        run: |
-          # The host stage of validate_switch_build.sh builds the shader compiler
-          # via FetchContent's upstream SDL3 3.4.2. SDL3 aborts on Linux without
-          # X11/Wayland unless SDL_UNIX_CONSOLE_BUILD=ON. The shaderc is a
-          # console-only tool with no windows, so seed the SAME build dir the
-          # script uses (build-switch-host) with that cache entry. The script's
-          # own `cmake -S -B build-switch-host` then reuses this cache.
-          cmake -S . -B build-switch-host \
-            -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF \
-            -DOPENYAMM_BUILD_TESTS=OFF \
-            -DSDL_UNIX_CONSOLE_BUILD=ON
-          grep -i SDL_UNIX_CONSOLE_BUILD build-switch-host/CMakeCache.txt
+          echo "::error::Could not obtain sdl3 portlib"; exit 1
 
       - name: Build NRO
         run: |
           . /opt/devkitpro/devkita64.sh
-          # CMake 3.31's FindPkgConfig sets PKG_CONFIG_VERSION as a plain variable
-          # inside openyamm_switch_pkg_config() (a function). pkg_check_modules()
-          # expands in a DIFFERENT function, where that variable is out of scope and
-          # empty -> "if(... LESS  OR ...): Unknown arguments specified".
-          # Seed it as a CACHE variable (globally visible) on the Switch configure.
-          # This edits ONLY the CI working copy; nothing is committed back.
+          export PATH="$DEVKITPRO/tools/bin:$DEVKITPRO/devkita64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH"
+          ROOT="$PWD"
+
+          echo "==> [1/5] Host shader compiler"
+          # Upstream SDL3 3.4.2 (host stage) aborts on Linux without X11/Wayland.
+          # The shaderc is a console tool, so SDL_UNIX_CONSOLE_BUILD=ON is correct.
+          cmake -S . -B build-switch-host \
+            -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF \
+            -DOPENYAMM_BUILD_TESTS=OFF \
+            -DSDL_UNIX_CONSOLE_BUILD=ON
+          cmake --build build-switch-host --target openyamm_shaderc --parallel
+
+          echo "==> [2/5] Configure Switch cross build"
+          # CMake 3.31 FindPkgConfig stores PKG_CONFIG_VERSION in a function
+          # scope; pkg_check_modules() expands elsewhere. A cache var is global.
+          cmake -S . -B build-switch \
+            -DCMAKE_TOOLCHAIN_FILE="$ROOT/switch-toolchain/switch.cmake" \
+            -DOPENYAMM_SWITCH=ON \
+            -DOPENYAMM_HOST_SHADERC="$ROOT/build-switch-host/openyamm_shaderc" \
+            -DOPENYAMM_BUILD_TESTS=OFF \
+            -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF \
+            -DPKG_CONFIG_VERSION=1
+
+          echo "==> [3/5] Patch bx platform.h for GCC 15 / Switch"
+          # FetchContent has now populated build-switch/_deps/bx-src. bx has no
+          # __SWITCH__ probe, and its visionOS probe uses a clang-only builtin
+          # that GCC 15 cannot preprocess. Force the NX/POSIX platform (libnx
+          # supplies pthread) and neutralise that probe. CI working copy only.
           python3 - <<'PY'
-          p = "switch/validate_switch_build.sh"
-          with open(p, encoding="utf-8", newline="") as f:
-              lines = f.readlines()
-          out, done = [], False
-          for ln in lines:
-              out.append(ln)
-              if not done and "-DOPENYAMM_SWITCH=ON" in ln:
-                  nl = "\r\n" if ln.endswith("\r\n") else "\n"
-                  out.append("    -DPKG_CONFIG_VERSION=1 \\" + nl)
-                  done = True
-          if not done:
-              raise SystemExit("ERROR: Switch configure anchor not found")
-          with open(p, "w", encoding="utf-8", newline="") as f:
-              f.writelines(out)
-          print("CI patch applied: -DPKG_CONFIG_VERSION=1")
+          import pathlib, sys
+          p = pathlib.Path("build-switch/_deps/bx-src/include/bx/platform.h")
+          if not p.exists():
+              sys.exit("ERROR: bx platform.h not found: " + str(p))
+          s = p.read_text()
+          bad = "#elif defined(__has_builtin) && __has_builtin(__is_target_os) && __is_target_os(xros)"
+          if bad not in s:
+              sys.exit("ERROR: bx visionOS probe line not found (bx changed?)")
+          s = s.replace(bad, "#elif 0  // visionOS probe disabled for GCC 15 (CI)", 1)
+          marker = "#define BX_PLATFORM_POSIX (0"
+          if marker not in s:
+              sys.exit("ERROR: BX_PLATFORM_POSIX definition not found")
+          inject = ("// devkitPro/libnx provides a POSIX pthread layer; bx has no\n"
+                    "// __SWITCH__ probe, so force its NX platform here (CI).\n"
+                    "#undef  BX_PLATFORM_NX\n"
+                    "#define BX_PLATFORM_NX 1  // Nintendo Switch\n\n")
+          s = s.replace(marker, inject + marker, 1)
+          p.write_text(s)
+          print("patched bx platform.h")
           PY
-          grep -n "PKG_CONFIG_VERSION" switch/validate_switch_build.sh
-          # validate_switch_build.sh exports its own PATH (incl. portlibs/switch/bin)
-          # and checks every required pkg-config module itself. Invoke via bash:
-          # sparse-checkout does not preserve the executable bit on the script.
-          bash switch/validate_switch_build.sh
+          grep -nE 'BX_PLATFORM_NX 1|visionOS probe disabled' \
+            build-switch/_deps/bx-src/include/bx/platform.h
+
+          echo "==> [4/5] Compile ESSL shaders"
+          cmake --build build-switch --target openyamm_runtime_shaders --parallel
+          shader_count=$(find build-switch/runtime/shaders/essl -maxdepth 1 \
+            -name '*.bin' -type f 2>/dev/null | wc -l)
+          echo "    $shader_count ESSL shaders"
+          [ "$shader_count" -gt 0 ] || { echo "::error::No ESSL shaders produced"; exit 1; }
+
+          echo "==> [5/5] Build OpenYAMM.nro"
+          cmake --build build-switch --target openyamm_switch_nro --parallel
+          test -f build-switch/OpenYAMM.nro || { echo "::error::OpenYAMM.nro missing"; exit 1; }
+          echo "==> Build OK: build-switch/OpenYAMM.nro"
 
       - name: Package artifact
         run: |
