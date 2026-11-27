@@ -363,11 +363,16 @@ int EngineApplication::run() const
         return 1;
     }
 
-#if defined(__ANDROID__) || defined(OPENYAMM_IOS)
+#if defined(__ANDROID__) || defined(OPENYAMM_IOS) || defined(OPENYAMM_SWITCH)
     SDL_SetHint(SDL_HINT_ORIENTATIONS, "LandscapeLeft LandscapeRight");
 #endif
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS))
+    // Gamepad init is required on Switch; PR #5 provides SDL_INIT_GAMEPAD handling elsewhere.
+    Uint32 sdlFlags = SDL_INIT_VIDEO | SDL_INIT_EVENTS;
+#if defined(OPENYAMM_SWITCH)
+    sdlFlags |= SDL_INIT_GAMEPAD;
+#endif
+    if (!SDL_Init(sdlFlags))
     {
         std::cerr << "SDL_Init failed: " << SDL_GetError() << '\n';
         return 1;
@@ -404,7 +409,7 @@ int EngineApplication::run() const
     }
 
     std::unique_ptr<SDL_Window, SdlWindowDeleter> pWindow(pRawWindow);
-#if !defined(__ANDROID__) && !defined(__APPLE__)
+#if !defined(__ANDROID__) && !defined(__APPLE__) && !defined(OPENYAMM_SWITCH)
     // Apple app bundles carry their own icon; a window icon would replace it in the Dock.
     const std::optional<std::vector<uint8_t>> iconBytes =
         assetFileSystem.readBinaryFile("engine/branding/app_icon.png");

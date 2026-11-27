@@ -455,8 +455,8 @@ void parseAssetScaleProfileValue(
 GameSettings GameSettings::createDefault()
 {
     GameSettings settings;
-#if defined(__ANDROID__)
-    settings.settingsProfileName = "android";
+#if defined(__ANDROID__) || defined(OPENYAMM_SWITCH)
+    settings.settingsProfileName = "android";  // Switch reuses the mobile low-spec profile.
 #else
     settings.settingsProfileName = "desktop";
 #endif
@@ -468,7 +468,7 @@ GameSettings GameSettings::createDefault()
     // their own choices. The surface texture tier is the one cooked tier the packages carry per platform
     // (tools/cook_surface_textures.py), x4 on desktop and x2 on Android. iOS GPUs have no BC formats, so iOS uses the
     // Android packages (ASTC/ETC2, x2 surfaces) and the Android defaults.
-#if defined(__ANDROID__) || defined(OPENYAMM_IOS)
+#if defined(__ANDROID__) || defined(OPENYAMM_IOS) || defined(OPENYAMM_SWITCH)
     settings.assetScaleProfile.textures = Engine::AssetScaleTier::X2;
     settings.soundVolume = 2;
     settings.voiceVolume = 2;

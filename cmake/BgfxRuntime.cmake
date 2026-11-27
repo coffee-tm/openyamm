@@ -3,7 +3,7 @@ include_guard(GLOBAL)
 option(OPENYAMM_GL_UNIFORM_CACHE "Skip unchanged desktop OpenGL uniform uploads." ON)
 
 function(openyamm_bgfx_shader_platform outputVariable)
-    if (ANDROID)
+    if (ANDROID OR OPENYAMM_SWITCH)
         set(shaderPlatform "android")
     elseif (WIN32)
         set(shaderPlatform "windows")
@@ -19,7 +19,8 @@ function(openyamm_bgfx_shader_platform outputVariable)
 endfunction()
 
 function(openyamm_bgfx_shader_targets outputVariable)
-    if (ANDROID)
+    if (ANDROID OR OPENYAMM_SWITCH)
+        # Switch GLES3 via switch-mesa consumes the same ESSL 300 shaders as Android.
         set(shaderTargets "android|300_es|essl")
     # Desktop GLSL 1.50, the newest the bundled shaderc validates, has Android's ESSL 3.00 features (texelFetch, integer
     # maths, flat varyings), so one shader source behaves alike on both (docs/LIGHTING_AND_MATERIALS_ARCHITECTURE.md, D2).
@@ -171,11 +172,11 @@ function(openyamm_configure_bgfx_runtime)
     if (NOT TARGET openyamm_bgfx)
         find_package(Threads REQUIRED)
 
-        if (NOT ANDROID AND NOT APPLE)
+        if (NOT ANDROID AND NOT APPLE AND NOT OPENYAMM_SWITCH)
             find_package(OpenGL REQUIRED)
         endif()
 
-        if (UNIX AND NOT APPLE AND NOT ANDROID)
+        if (UNIX AND NOT APPLE AND NOT ANDROID AND NOT OPENYAMM_SWITCH)
             find_package(X11 REQUIRED)
         endif()
 
@@ -251,7 +252,7 @@ function(openyamm_configure_bgfx_runtime)
             set(openyammBgfxOpenGlVersion 0)
             set(openyammBgfxOpenGlesVersion 0)
             set(openyammBgfxDebug "$<IF:$<CONFIG:Debug>,1,0>")
-        elseif (ANDROID)
+        elseif (ANDROID OR OPENYAMM_SWITCH)
             set(openyammBgfxOpenGlVersion 0)
             set(openyammBgfxOpenGlesVersion 30)
             set(openyammBgfxDebug 0)
@@ -282,7 +283,7 @@ function(openyamm_configure_bgfx_runtime)
                 BGFX_CONFIG_RENDERER_OPENGLES=${openyammBgfxOpenGlesVersion}
         )
 
-        if (NOT ANDROID AND NOT EMSCRIPTEN)
+        if (NOT ANDROID AND NOT EMSCRIPTEN AND NOT OPENYAMM_SWITCH)
             target_compile_definitions(openyamm_bgfx PRIVATE
                 OPENYAMM_BGFX_GL_UNIFORM_CACHE=$<BOOL:${OPENYAMM_GL_UNIFORM_CACHE}>)
         endif()
@@ -301,13 +302,14 @@ function(openyamm_configure_bgfx_runtime)
             if (NOT IOS)
                 target_link_libraries(openyamm_bgfx PUBLIC "-framework IOKit")
             endif()
-        elseif (ANDROID)
-            target_link_libraries(openyamm_bgfx PUBLIC EGL GLESv3 android log)
+        elseif (ANDROID OR OPENYAMM_SWITCH)
+            # switch-mesa provides EGL + GLESv3; libnx provides the rest.
+            target_link_libraries(openyamm_bgfx PUBLIC EGL GLESv3 nx)
         else()
             target_link_libraries(openyamm_bgfx PUBLIC OpenGL::GL)
         endif()
 
-        if (UNIX AND NOT APPLE AND NOT ANDROID)
+        if (UNIX AND NOT APPLE AND NOT ANDROID AND NOT OPENYAMM_SWITCH)
             target_link_libraries(openyamm_bgfx PUBLIC X11::X11 X11::Xext)
         endif()
     endif()

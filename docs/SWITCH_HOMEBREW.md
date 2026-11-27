@@ -1,0 +1,69 @@
+# Nintendo Switch homebrew port (work in progress)
+
+This branch contains the first platform-skeleton changes for building OpenYAMM with
+devkitA64/libnx. It is intended for research and personal use. It is **not** a
+finished or playable `.nro` yet.
+
+Base commit: `77fa3d8` (upstream `pjasicek/openyamm` main).
+
+## What is included
+
+- Add the `OPENYAMM_SWITCH` CMake option/compile definition.
+- Reuse the Android low-spec settings profile on Switch.
+- Use the Android/ESSL 300 shader path for GLES3 through switch-mesa.
+- Skip desktop-only OpenGL/X11/host-icon paths.
+- Link against `EGL`, `GLESv3`, and `nx`.
+- Initialize SDL with `SDL_INIT_GAMEPAD` on Switch.
+- Add `switch-toolchain/switch.cmake` for devkitA64 cross compilation.
+- Add this document.
+
+## What is not included yet
+
+- No `.nro` entry point, NACP metadata, or icon packaging.
+- No romfs/SD card asset mounting changes.
+- No gamepad action mapping. PR #5 (`pulsipd:feature/gamepad-input`) is outdated
+  against current main and is only used as a reference.
+- No ENet/network, updater, `execv`/`popen`, or `SDL_OpenURL` trimming for Switch.
+- No devkitA64 build or hardware test has been performed here.
+
+## Prerequisites
+
+Install devkitPro with at least:
+
+- `switch-dev`
+- `switch-sdl-3.4`
+- `switch-mesa`
+- required portlibs used by OpenYAMM (FFmpeg, FreeType, etc.)
+
+Initialize the environment, for example:
+
+```bash
+source /opt/devkitpro/devkita64.sh
+```
+
+## Build
+
+First build the host shader compiler. Cross-compiled binaries cannot run on the host:
+
+```bash
+cmake -S . -B build-host -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF
+cmake --build build-host --target openyamm_shaderc
+```
+
+Then configure the Switch cross build:
+
+```bash
+cmake -S . -B build-switch \
+  -DCMAKE_TOOLCHAIN_FILE=switch-toolchain/switch.cmake \
+  -DOPENYAMM_SWITCH=ON \
+  -DOPENYAMM_HOST_SHADERC=$PWD/build-host/openyamm_shaderc \
+  -DOPENYAMM_BUILD_TESTS=OFF \
+  -DOPENYAMM_BUILD_DESKTOP_EXECUTABLE=OFF
+cmake --build build-switch
+```
+
+## Recommended next step
+
+Before attempting a full game build, verify a minimal SDL3 + GLES3 program on the
+console. That validates `switch-sdl-3.4`, switch-mesa, EGL/GLESv3, and shader
+support independently of the rest of the engine.
