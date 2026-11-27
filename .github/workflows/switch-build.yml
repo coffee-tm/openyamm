@@ -24,6 +24,29 @@ jobs:
           ref: switch/homebrew
           fetch-depth: 1
           persist-credentials: false
+          # The repo carries ~20 GB of game assets (assets_dev). A full checkout
+          # spends most of the job downloading them, which the NRO build never reads.
+          sparse-checkout-cone-mode: false
+          sparse-checkout: |
+            /CMakeLists.txt
+            /LICENSE
+            /COPYRIGHT
+            /cmake/
+            /core/
+            /engine/
+            /game/
+            /third_party/cgltf/
+            /switch/
+            /switch-toolchain/
+            /tools/openyamm_shaderc_stubs.cpp
+            /tools/cook_sprite_atlases_main.cpp
+            /tools/SpriteAtlasEncode.cpp
+            /tools/SpriteAtlasEncode.h
+            /tools/TextureBlockEncode.cpp
+            /tools/TextureBlockEncode.h
+            /tools/cook_model_textures_main.cpp
+            /tools/CookModelGeometry.cpp
+            /tools/CookModelGeometry.h
 
       - name: Host build dependencies
         run: |
