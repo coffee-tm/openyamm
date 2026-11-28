@@ -371,7 +371,12 @@ jobs:
                     "        \"$ENV{DEVKITPRO}/libnx/lib\"\n"
                     "        \"$ENV{DEVKITPRO}/portlibs/switch/lib\"\n"
                     "        \"${CMAKE_SOURCE_DIR}/switch-compat/lib\")\n"
-                    "    target_link_libraries(openyamm_switch PRIVATE openyammcompat)\n"
+                    "    # nx is listed here *after* the portlibs on purpose: the\n"
+                    "    # -specs=switch.specs copy of -lnx is scanned before\n"
+                    "    # libavutil.a, so its nvtegra MMU symbols stay unresolved\n"
+                    "    # until libavutil pulls hwcontext_nvtegra.o. A second -lnx\n"
+                    "    # at the end of the line closes that ordering hole.\n"
+                    "    target_link_libraries(openyamm_switch PRIVATE openyammcompat nx)\n"
                     "endif()\n")
               p.write_text(s)
           print("hooked compat shim + link paths into openyamm_game")
