@@ -234,9 +234,11 @@ jobs:
           // carries the x2 surface textures the Switch profile asks for, into the packaged
           // layout AssetFileSystem mounts (assets/index.json + assets/packs/*.zip).
           //
-          // TLS verification is left off because libnx's ssl service cannot be handed a CA
-          // bundle here; the manifest is checked against the Ed25519 key compiled into the
-          // game, and every pack against the SHA-256 the signed manifest lists.
+          // Only engine and the starting world are fetched first; the other continents can
+          // be added later by the same mechanism. TLS verification is left off because
+          // libnx's ssl service cannot be handed a CA bundle here; the manifest is checked
+          // against the Ed25519 key compiled into the game, and every pack against the
+          // SHA-256 the signed manifest lists.
 
           namespace OpenYAMM::Game
           {
@@ -274,9 +276,9 @@ jobs:
               state.detail = detail;
           }
 
-          void fail(DownloadState &state, const std::string &message)
+          void fail(DownloadState &state, const std::string &message, const std::string &detail = {})
           {
-              setMessage(state, message);
+              setMessage(state, message, detail);
               state.failed.store(true);
               state.finished.store(true);
           }
@@ -503,8 +505,8 @@ jobs:
                   const Engine::AssetPackRecord &pack = manifest.packs[selected[position]];
                   text += "  {\"id\": \"" + escapeJson(pack.id) + "\", \"package\": \"" + escapeJson(pack.package)
                       + "\", \"mount\": \"" + escapeJson(pack.mount) + "\", \"file\": \"" + escapeJson(pack.file)
-                      + "\", \"size\": " + std::to_string(pack.size) + ", \"content_id\": \""
-                      + escapeJson(pack.contentId) + "\", \"sha256\": \"" + escapeJson(pack.sha256) + "\"}";
+                      + "\", \"size\": " + std::to_string(pack.size) + ", \"content_id\": \"" + escapeJson(pack.contentId)
+                      + "\", \"sha256\": \"" + escapeJson(pack.sha256) + "\"}";
 
                   if (position + 1 < selected.size())
                   {
@@ -598,16 +600,14 @@ jobs:
               std::string manifestText;
               std::string signatureText;
 
-              if (!httpGetText(manifestUrl, manifestText, error)
-                  || !httpGetText(manifestUrl + ".sig", signatureText, error))
+              if (!httpGetText(manifestUrl, manifestText, error) || !httpGetText(manifestUrl + ".sig", signatureText, error))
               {
                   fail(*pState, "Cannot reach the content server. Connect the console to the internet and start again.",
                        error);
                   return;
               }
 
-              if (!Engine::verifyManifestSignature(manifestText, signatureText, Engine::releaseManifestPublicKeys(),
-                                                   error))
+              if (!Engine::verifyManifestSignature(manifestText, signatureText, Engine::releaseManifestPublicKeys(), error))
               {
                   fail(*pState, "The content list did not verify; the download was stopped.", error);
                   return;
@@ -617,8 +617,7 @@ jobs:
 
               if (!manifest || manifest->platform != ManifestPlatform)
               {
-                  fail(*pState, "The content server sent an unexpected release.",
-                       manifest ? manifest->platform : error);
+                  fail(*pState, "The content server sent an unexpected release.", manifest ? manifest->platform : error);
                   return;
               }
 
@@ -661,7 +660,6 @@ jobs:
 
               std::vector<Job> jobs;
               uint64_t totalBytes = 0;
-              int presentPacks = 0;
 
               for (const size_t index : selected)
               {
@@ -671,7 +669,7 @@ jobs:
 
                   if (!fileError && size == pack.size)
                   {
-                      ++presentPacks;
+                      ++pState->donePacks;
                       continue;
                   }
 
@@ -689,8 +687,8 @@ jobs:
               }
 
               pState->totalBytes.store(totalBytes);
-              pState->totalPacks.store(int(selected.size()));
-              pState->donePacks.store(presentPacks);
+              pState->totalPacks.store(int(jobs.size()));
+              pState->donePacks.store(int(selected.size() - jobs.size()));
 
               for (size_t position = 0; position < jobs.size(); ++position)
               {
@@ -708,8 +706,8 @@ jobs:
                              "Pack " + std::to_string(position + 1) + " of " + std::to_string(jobs.size()) + ": "
                                  + pack.package);
 
-                  if (!downloadPack(std::string(UpdateBaseUrl) + manifest->packUrls[job.packIndex], target, pack,
-                                    pState, error))
+                  if (!downloadPack(std::string(UpdateBaseUrl) + manifest->packUrls[job.packIndex], target, pack, pState,
+                                    error))
                   {
                       if (pState->cancel.load())
                       {
@@ -717,10 +715,8 @@ jobs:
                           return;
                       }
 
-                      fail(*pState,
-                           "The download stopped. Check the connection and start the game again; finished packs are "
-                           "kept.",
-                           error);
+                      fail(*pState, "The download stopped. Check the connection and start the game again; finished packs are "
+                                    "kept.", error);
                       return;
                   }
 
@@ -730,7 +726,6 @@ jobs:
               setMessage(*pState, "Finishing the installation...");
               const std::string indexText = buildIndexJson(*manifest, selected);
               const std::filesystem::path indexTemporary = assetRoot / "index.json.tmp";
-
               {
                   std::ofstream output(indexTemporary, std::ios::binary | std::ios::trunc);
                   output.write(indexText.data(), std::streamsize(indexText.size()));
@@ -807,8 +802,7 @@ jobs:
 
               if (R_FAILED(socketResult))
               {
-                  std::fprintf(stderr, "Switch content bootstrap: socketInitializeDefault failed: %08x\n",
-                               socketResult);
+                  std::fprintf(stderr, "Switch content bootstrap: socketInitializeDefault failed: %08x\n", socketResult);
                   return false;
               }
 
@@ -827,22 +821,19 @@ jobs:
 
               if (uiReady)
               {
-                  uiReady = SDL_CreateWindowAndRenderer("OpenYAMM", ScreenWidth * 2, ScreenHeight * 2, 0, &pWindow,
-                                                        &pRenderer);
+                  uiReady = SDL_CreateWindowAndRenderer("OpenYAMM", ScreenWidth * 2, ScreenHeight * 2, 0, &pWindow, &pRenderer);
               }
 
               if (!uiReady)
               {
-                  std::fprintf(stderr, "Switch content bootstrap: cannot open the progress window: %s\n",
-                               SDL_GetError());
+                  std::fprintf(stderr, "Switch content bootstrap: cannot open the progress window: %s\n", SDL_GetError());
                   state.cancel.store(true);
                   worker.join();
                   curl_global_cleanup();
                   return false;
               }
 
-              SDL_SetRenderLogicalPresentation(pRenderer, ScreenWidth, ScreenHeight,
-                                               SDL_LOGICAL_PRESENTATION_LETTERBOX);
+              SDL_SetRenderLogicalPresentation(pRenderer, ScreenWidth, ScreenHeight, SDL_LOGICAL_PRESENTATION_LETTERBOX);
 
               uint64_t finishedAt = 0;
 
@@ -853,8 +844,7 @@ jobs:
                   while (SDL_PollEvent(&event))
                   {
                       if (event.type == SDL_EVENT_QUIT
-                          || (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN
-                              && event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST)
+                          || (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST)
                           || (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE))
                       {
                           state.cancel.store(true);
@@ -915,8 +905,7 @@ jobs:
                   {
                       const SDL_FRect frame = {Margin, 200.0f, float(ScreenWidth) - 2.0f * Margin, 18.0f};
                       const float fraction = float(double(done) / double(total));
-                      const SDL_FRect bar = {frame.x + 2.0f, frame.y + 2.0f, (frame.w - 4.0f) * fraction,
-                                             frame.h - 4.0f};
+                      const SDL_FRect bar = {frame.x + 2.0f, frame.y + 2.0f, (frame.w - 4.0f) * fraction, frame.h - 4.0f};
                       SDL_SetRenderDrawColor(pRenderer, 120, 98, 58, 255);
                       SDL_RenderRect(pRenderer, &frame);
                       SDL_SetRenderDrawColor(pRenderer, 214, 178, 106, 255);
@@ -925,14 +914,12 @@ jobs:
                       SDL_SetRenderDrawColor(pRenderer, 232, 226, 210, 255);
                       drawLine(pRenderer, Margin, 228.0f, 1.0f,
                                amountText(done) + " of " + amountText(total) + "   -   pack "
-                                   + std::to_string(state.donePacks.load()) + " / "
-                                   + std::to_string(state.totalPacks.load()));
+                                   + std::to_string(state.donePacks.load()) + " / " + std::to_string(state.totalPacks.load()));
                   }
 
                   SDL_SetRenderDrawColor(pRenderer, 170, 166, 158, 255);
                   drawLine(pRenderer, Margin, float(ScreenHeight) - Margin - GlyphSize, 1.0f,
-                           state.failed.load() ? "Press B to close"
-                                               : "Keep the console on. Press B to cancel.");
+                           state.failed.load() ? "Press B to close" : "Keep the console on. Press B to cancel.");
 
                   SDL_RenderPresent(pRenderer);
 
@@ -960,8 +947,7 @@ jobs:
           }
           }
           EOC
-          grep -c 'switchBootstrapContent' game/app/SwitchContentBootstrap.cpp
-
+          grep -n "switchBootstrapContent" game/app/SwitchContentBootstrap.h game/app/SwitchContentBootstrap.cpp
       - name: Hook the bootstrapper into the game
         run: |
           python3 - <<'PY'
@@ -995,7 +981,10 @@ jobs:
               p.write_text(s)
           print("hooked the content bootstrap into SwitchMain.cpp")
 
-          # 2. Build the new file into openyamm_game and link switch-curl.
+          # 2. Build the new file into openyamm_switch, not openyamm_game: <switch.h> only
+          #    reaches targets that see libnx's include path (the `nx` interface target
+          #    SwitchMain.cpp already links). openyamm_game is a plain static library and
+          #    does not link nx, which is why the first attempt failed on #include <switch.h>.
           p = pathlib.Path("game/CMakeLists.txt")
           if not p.exists():
               sys.exit("ERROR: game/CMakeLists.txt not found")
@@ -1003,20 +992,17 @@ jobs:
           if "SwitchContentBootstrap" not in s:
               s += (
                   "\n# CI-only: Switch content bootstrapper (Android x2 content profile).\n"
-                  "if (TARGET openyamm_game AND OPENYAMM_SWITCH)\n"
-                  "    target_sources(openyamm_game PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/SwitchContentBootstrap.cpp)\n"
+                  "if (TARGET openyamm_switch AND OPENYAMM_SWITCH)\n"
+                  "    target_sources(openyamm_switch PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/SwitchContentBootstrap.cpp)\n"
                   "    find_package(PkgConfig QUIET)\n"
                   "    if (NOT PKG_CONFIG_FOUND)\n"
                   "        message(FATAL_ERROR \"the Switch content bootstrapper needs pkg-config and switch-curl\")\n"
                   "    endif()\n"
                   "    pkg_check_modules(SWITCH_CURL REQUIRED libcurl)\n"
-                  "    target_include_directories(openyamm_game PRIVATE ${SWITCH_CURL_INCLUDE_DIRS})\n"
-                  "    if (TARGET openyamm_switch)\n"
-                  "        target_link_directories(openyamm_switch PRIVATE ${SWITCH_CURL_LIBRARY_DIRS})\n"
-                  "        # curl is static: its private deps (zlib, libnx) have to follow it.\n"
-                  "        target_link_libraries(openyamm_switch PRIVATE\n"
-                  "            ${SWITCH_CURL_STATIC_LIBRARIES} z openyammcompat nx)\n"
-                  "    endif()\n"
+                  "    target_include_directories(openyamm_switch PRIVATE ${SWITCH_CURL_INCLUDE_DIRS})\n"
+                  "    target_link_directories(openyamm_switch PRIVATE ${SWITCH_CURL_LIBRARY_DIRS})\n"
+                  "    # curl is static: its private deps (zlib, libnx) have to follow it.\n"
+                  "    target_link_libraries(openyamm_switch PRIVATE ${SWITCH_CURL_STATIC_LIBRARIES} z)\n"
                   "endif()\n")
               p.write_text(s)
           print("hooked the content bootstrapper into game/CMakeLists.txt")
