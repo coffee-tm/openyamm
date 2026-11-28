@@ -496,6 +496,60 @@ jobs:
               print("patched " + str(p) + " (no shell helpers)")
           else:
               print("imgui.cpp already patched")
+
+          # --- RuntimeShader: resolve shaders from the working directory ---
+          # Switch's SDL3 returns "romfs:/" from SDL_GetBasePath() unconditionally
+          # (src/filesystem/switch/SDL_sysfilesystem.c), so an NRO without an
+          # embedded ROMFS looks for romfs:/runtime/shaders/essl/*.bin, finds
+          # nothing, and fails to load every runtime program: the SD-card asset
+          # build would start with a black or broken scene. Add the working
+          # directory (assets/ first, then the bare root) to the search, which
+          # is the layout docs/BUILD_SWITCH.zh-CN.md section 5 documents.
+          p = pathlib.Path("game/render/RuntimeShader.cpp")
+          must(p.exists(), "RuntimeShader.cpp not found")
+          s = p.read_text()
+          if "CI: Switch SD-card shader fallback" not in s:
+              s = s.replace("#include <iterator>\n",
+                            "#include <iterator>\n#include <system_error>\n", 1)
+              anchor = ("        return packagedPath;\n"
+                        "    }\n"
+                        "\n"
+                        "    return configuredShaderRoot / shaderName;")
+              must(anchor in s, "RuntimeShader getShaderPath tail not found (source changed?)")
+              fallback = (
+                  "        // CI: Switch SD-card shader fallback. SDL_GetBasePath() is\n"
+                  "        // \"romfs:/\" on Switch, so an NRO without embedded ROMFS never\n"
+                  "        // finds shaders next to the executable; look in the working\n"
+                  "        // directory the Switch entry point enters (sdmc:/switch/openyamm).\n"
+                  "        std::error_code cwdError;\n"
+                  "        const std::filesystem::path workingDirectory =\n"
+                  "            std::filesystem::current_path(cwdError);\n"
+                  "\n"
+                  "        if (!cwdError)\n"
+                  "        {\n"
+                  "            const std::filesystem::path candidates[] = {\n"
+                  "                workingDirectory / configuredShaderRoot / shaderName,\n"
+                  "                workingDirectory / \"assets\" / configuredShaderRoot / shaderName,\n"
+                  "            };\n"
+                  "\n"
+                  "            for (const std::filesystem::path &candidate : candidates)\n"
+                  "            {\n"
+                  "                if (std::filesystem::exists(candidate))\n"
+                  "                {\n"
+                  "                    return candidate;\n"
+                  "                }\n"
+                  "            }\n"
+                  "        }\n"
+                  "\n"
+                  "        return packagedPath;\n"
+                  "    }\n"
+                  "\n"
+                  "    return configuredShaderRoot / shaderName;")
+              s = s.replace(anchor, fallback, 1)
+              p.write_text(s)
+              print("patched RuntimeShader.cpp (working-directory shader fallback)")
+          else:
+              print("RuntimeShader.cpp already patched")
           PY
           grep -nE 'BX_PLATFORM_NX 1|visionOS probe disabled' \
             build-switch/_deps/bx-src/include/bx/platform.h
@@ -503,6 +557,8 @@ jobs:
             build-switch/_deps/lua-src/src/luaconf.h
           grep -nE 'defined\(__SWITCH__\)' \
             build-switch/_deps/bgfx-src/3rdparty/khronos/EGL/eglplatform.h
+          grep -n 'CI: Switch SD-card shader fallback' game/render/RuntimeShader.cpp
+          grep -n 'include <system_error>' game/render/RuntimeShader.cpp
 
           echo "==> [4/5] Compile ESSL shaders"
           rc=0
