@@ -19,6 +19,11 @@ name: Switch NRO
 
 on:
   workflow_dispatch:
+  # Rebuild when the build recipe itself changes, so a CI fix can be verified
+  # without clicking Run workflow by hand.
+  push:
+    paths:
+      - '.github/workflows/switch-build.yml'
 
 permissions:
   contents: read
