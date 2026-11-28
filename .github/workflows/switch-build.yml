@@ -628,6 +628,13 @@ jobs:
                   return;
               }
 
+              if (manifest->packUrls.size() != manifest->packs.size())
+              {
+                  fail(*pState, "The content list is malformed; the download was stopped.",
+                       "pack url count mismatch");
+                  return;
+              }
+
               std::vector<size_t> selected;
 
               for (size_t index = 0; index < manifest->packs.size(); ++index)
@@ -1458,6 +1465,19 @@ jobs:
           tail -n 20 build-nro.log || true
           test -f build-switch/OpenYAMM.nro || { echo "::error::OpenYAMM.nro missing"; exit 1; }
           echo "==> Build OK: build-switch/OpenYAMM.nro"
+
+      - name: Report build errors
+        if: failure()
+        run: |
+          for log in build-nro.log build-shaders.log; do
+            [ -f "$log" ] || continue
+            echo "===== $log: error digest ====="
+            grep -nE "error:|fatal error|undefined reference|multiple definition|cannot find -l|No rule to make target" "$log" \
+              | head -n 30 \
+              | while IFS= read -r line; do echo "::error::$log:$line"; done || true
+            echo "===== $log: last 60 lines ====="
+            tail -n 60 "$log" || true
+          done
 
       - name: Keep build logs
         if: always()
