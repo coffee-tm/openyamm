@@ -222,15 +222,17 @@ jobs:
           #include "engine/update/Sha256.h"
 
           #include <atomic>
+          #include <cstdarg>
           #include <cstdint>
           #include <cstdio>
+          #include <ctime>
           #include <filesystem>
           #include <fstream>
           #include <mutex>
           #include <optional>
           #include <string>
           #include <system_error>
-          #include <thread>
+          #include <utility>
           #include <vector>
 
           // The Switch build has no self-updater (game/app/ContentSetup.cpp returns Quit on
@@ -254,6 +256,65 @@ jobs:
           constexpr const char *ManifestPlatform = "android-arm64";
           constexpr const char *StoreDirectoryName = "packs";
           constexpr const char *WantedPackages[] = {"engine", "mm8"};
+
+          // Bumped whenever this file changes so a log can be matched to an NRO build.
+          constexpr const char *BootstrapTag = "bootstrap-2026-11-28-b";
+          // The download worker gets its own stack: std::thread inherits newlib's default,
+          // which is far too small for curl + TLS + the JSON parse (a silent overflow).
+          constexpr size_t WorkerStackSize = 512 * 1024;
+
+          // The engine's own log only opens once the content is in place, so a bootstrap
+          // that fails or crashes leaves no trace at all. Everything below therefore goes
+          // to its own unbuffered file, written next to the assets folder.
+          std::mutex gLogMutex;
+          std::FILE *gLog = nullptr;
+
+          void openBootstrapLog(const std::filesystem::path &userDataRoot)
+          {
+              std::lock_guard<std::mutex> lock(gLogMutex);
+
+              if (gLog != nullptr)
+              {
+                  return;
+              }
+
+              std::error_code error;
+              std::filesystem::create_directories(userDataRoot, error);
+              gLog = std::fopen((userDataRoot / "bootstrap.log").string().c_str(), "a");
+
+              if (gLog != nullptr)
+              {
+                  // Unbuffered: whatever is written survives a crash later in this run.
+                  std::setvbuf(gLog, nullptr, _IONBF, 0);
+              }
+          }
+
+          void blog(const char *pFormat, ...)
+          {
+              std::lock_guard<std::mutex> lock(gLogMutex);
+
+              if (gLog == nullptr)
+              {
+                  return;
+              }
+
+              const std::time_t now = std::time(nullptr);
+              std::tm local = {};
+              // localtime, not localtime_r: devkitPro's newlib does not declare the POSIX variant.
+              if (const std::tm *pLocal = std::localtime(&now))
+              {
+                  local = *pLocal;
+              }
+              std::fprintf(gLog, "[%02d:%02d:%02d] ", local.tm_hour, local.tm_min, local.tm_sec);
+
+              va_list arguments;
+              va_start(arguments, pFormat);
+              std::vfprintf(gLog, pFormat, arguments);
+              va_end(arguments);
+
+              std::fputc('\n', gLog);
+          }
+
 
           constexpr int ScreenWidth = 640;
           constexpr int ScreenHeight = 360;
@@ -601,33 +662,66 @@ jobs:
 
               setMessage(*pState, "Checking the content server...");
 
+              // Networking is brought up here, not before the window: a failure has to be
+              // readable on screen instead of closing the game with no explanation.
+              const Result socketResult = socketInitializeDefault();
+              blog("socketInitializeDefault: %08x", socketResult);
+
+              if (R_FAILED(socketResult))
+              {
+                  fail(*pState, "The console network services did not start.", "socketInitializeDefault failed");
+                  return;
+              }
+
+              if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
+              {
+                  blog("curl_global_init failed");
+                  fail(*pState, "The downloader did not start.", "curl_global_init failed");
+                  return;
+              }
+
+              blog("curl %s", curl_version());
+
               const std::string manifestUrl = std::string(UpdateBaseUrl) + ManifestRelativePath;
               std::string manifestText;
               std::string signatureText;
 
+              blog("fetching %s", manifestUrl.c_str());
+
               if (!httpGetText(manifestUrl, manifestText, error) || !httpGetText(manifestUrl + ".sig", signatureText, error))
               {
+                  blog("manifest download failed: %s", error.c_str());
                   fail(*pState, "Cannot reach the content server. Connect the console to the internet and start again.",
                        error);
                   return;
               }
 
+              blog("manifest downloaded (%zu bytes) + signature (%zu bytes)", manifestText.size(), signatureText.size());
+
               if (!Engine::verifyManifestSignature(manifestText, signatureText, Engine::releaseManifestPublicKeys(), error))
               {
+                  blog("manifest signature rejected: %s", error.c_str());
                   fail(*pState, "The content list did not verify; the download was stopped.", error);
                   return;
               }
+
+              blog("manifest signature verified");
 
               std::optional<Engine::ReleaseManifest> manifest = Engine::parseReleaseManifest(manifestText, error);
 
               if (!manifest || manifest->platform != ManifestPlatform)
               {
+                  blog("unexpected manifest: %s", manifest ? manifest->platform.c_str() : error.c_str());
                   fail(*pState, "The content server sent an unexpected release.", manifest ? manifest->platform : error);
                   return;
               }
 
+              blog("manifest release %s build %s, %zu packs, content format %u", manifest->release.c_str(),
+                   manifest->build.c_str(), manifest->packs.size(), manifest->contentFormat);
+
               if (manifest->contentFormat != Engine::SupportedContentFormat)
               {
+                  blog("content format %u is not supported", manifest->contentFormat);
                   fail(*pState, "This build cannot read the published content format.",
                        std::to_string(manifest->contentFormat));
                   return;
@@ -701,6 +795,8 @@ jobs:
               pState->totalBytes.store(totalBytes);
               pState->totalPacks.store(int(jobs.size()));
               pState->donePacks.store(int(selected.size() - jobs.size()));
+              blog("%zu of %zu packs selected, %llu bytes to download, %zu already present", jobs.size(), selected.size(),
+                   static_cast<unsigned long long>(totalBytes), selected.size() - jobs.size());
 
               for (size_t position = 0; position < jobs.size(); ++position)
               {
@@ -723,19 +819,24 @@ jobs:
                   {
                       if (pState->cancel.load())
                       {
+                          blog("download cancelled after %d packs", pState->donePacks.load());
                           pState->finished.store(true);
                           return;
                       }
 
+                      blog("pack %s failed: %s", pack.file.c_str(), error.c_str());
                       fail(*pState, "The download stopped. Check the connection and start the game again; finished packs are "
                                     "kept.", error);
                       return;
                   }
 
                   pState->donePacks.fetch_add(1);
+                  blog("pack %d/%zu done: %s (%s)", pState->donePacks.load(), jobs.size(), pack.file.c_str(),
+                       pack.package.c_str());
               }
 
               setMessage(*pState, "Finishing the installation...");
+              blog("all packs downloaded, writing %s", Engine::AssetPackIndexFileName);
               const std::string indexText = buildIndexJson(*manifest, selected);
               const std::filesystem::path indexTemporary = assetRoot / "index.json.tmp";
               {
@@ -755,10 +856,12 @@ jobs:
 
               if (fileError)
               {
+                  blog("cannot rename the index: %s", fileError.message().c_str());
                   fail(*pState, "Cannot write the content index to the SD card.");
                   return;
               }
 
+              blog("content installed under %s", assetRoot.string().c_str());
               pState->finished.store(true);
           }
 
@@ -800,66 +903,103 @@ jobs:
           }
           }
 
+          void runDownloadEntry(void *pArgument)
+          {
+              auto *pRequest = static_cast<std::pair<std::filesystem::path, DownloadState *> *>(pArgument);
+              runDownload(pRequest->first, pRequest->second);
+          }
+
           bool switchBootstrapContent(const std::filesystem::path &assetRoot)
           {
+              openBootstrapLog(assetRoot.parent_path());
+              blog("");
+              blog("=== %s === asset root %s", BootstrapTag, assetRoot.string().c_str());
+
               if (contentReady(assetRoot))
               {
+                  blog("content already installed; nothing to do");
                   return true;
               }
 
               std::error_code directoryError;
               std::filesystem::create_directories(assetRoot, directoryError);
 
-              const Result socketResult = socketInitializeDefault();
-
-              if (R_FAILED(socketResult))
+              if (directoryError)
               {
-                  std::fprintf(stderr, "Switch content bootstrap: socketInitializeDefault failed: %08x\n", socketResult);
-                  return false;
-              }
-
-              if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
-              {
-                  std::fprintf(stderr, "Switch content bootstrap: curl_global_init failed\n");
+                  blog("cannot create %s: %s", assetRoot.string().c_str(), directoryError.message().c_str());
                   return false;
               }
 
               DownloadState state;
-              std::thread worker(runDownload, assetRoot, &state);
+              std::pair<std::filesystem::path, DownloadState *> request{assetRoot, &state};
 
-              bool uiReady = SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
-              SDL_Window *pWindow = nullptr;
-              SDL_Renderer *pRenderer = nullptr;
+              // A raw libnx thread so the stack size is ours: newlib's default is too small
+              // for curl's TLS handshake plus the manifest parse.
+              static Thread workerThread;
+              static unsigned char workerStack[WorkerStackSize] __attribute__((aligned(0x1000)));
+              Result threadResult = threadCreate(&workerThread, runDownloadEntry, &request, workerStack,
+                                                 sizeof(workerStack), 0x2C, -2);
+              blog("threadCreate: %08x", threadResult);
 
-              if (uiReady)
+              if (R_FAILED(threadResult))
               {
-                  uiReady = SDL_CreateWindowAndRenderer("OpenYAMM", ScreenWidth * 2, ScreenHeight * 2, 0, &pWindow, &pRenderer);
-              }
-
-              if (!uiReady)
-              {
-                  std::fprintf(stderr, "Switch content bootstrap: cannot open the progress window: %s\n", SDL_GetError());
-                  state.cancel.store(true);
-                  worker.join();
-                  curl_global_cleanup();
                   return false;
               }
 
-              SDL_SetRenderLogicalPresentation(pRenderer, ScreenWidth, ScreenHeight, SDL_LOGICAL_PRESENTATION_LETTERBOX);
+              threadResult = threadStart(&workerThread);
+              blog("threadStart: %08x", threadResult);
 
+              if (R_FAILED(threadResult))
+              {
+                  threadClose(&workerThread);
+                  return false;
+              }
+
+              bool uiReady = SDL_InitSubSystem(SDL_INIT_VIDEO);
+              SDL_Window *pWindow = nullptr;
+              SDL_Renderer *pRenderer = nullptr;
+
+              if (!uiReady)
+              {
+                  blog("SDL_INIT_VIDEO failed: %s", SDL_GetError());
+              }
+              else
+              {
+                  // The pad is only used for the B button; a failure here must not stop the download.
+                  SDL_InitSubSystem(SDL_INIT_GAMEPAD);
+                  uiReady = SDL_CreateWindowAndRenderer("OpenYAMM", ScreenWidth * 2, ScreenHeight * 2, 0, &pWindow, &pRenderer);
+
+                  if (!uiReady)
+                  {
+                      blog("cannot open the progress window: %s", SDL_GetError());
+                  }
+                  else
+                  {
+                      SDL_SetRenderLogicalPresentation(pRenderer, ScreenWidth, ScreenHeight,
+                                                       SDL_LOGICAL_PRESENTATION_LETTERBOX);
+                      blog("progress window ready");
+                  }
+              }
+
+              // Without a window the content still has to arrive, so keep downloading headless.
               uint64_t finishedAt = 0;
 
               while (true)
               {
-                  SDL_Event event;
-
-                  while (SDL_PollEvent(&event))
+                  if (uiReady)
                   {
-                      if (event.type == SDL_EVENT_QUIT
-                          || (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN && event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST)
-                          || (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE))
+                      SDL_Event event;
+
+                      while (SDL_PollEvent(&event))
                       {
-                          state.cancel.store(true);
+                          if (event.type == SDL_EVENT_QUIT
+                              || (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN
+                                  && event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST)
+                              || (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE))
+                          {
+                              blog("cancel requested by the player");
+                              state.cancel.store(true);
+                          }
                       }
                   }
 
@@ -868,6 +1008,17 @@ jobs:
                   if (finished && !state.failed.load())
                   {
                       break;
+                  }
+
+                  if (!uiReady)
+                  {
+                      if (finished)
+                      {
+                          break;
+                      }
+
+                      svcSleepThread(200000000ull);
+                      continue;
                   }
 
                   if (finished && finishedAt == 0)
@@ -944,18 +1095,30 @@ jobs:
               }
 
               state.cancel.store(true);
+              threadWaitForExit(&workerThread);
+              threadClose(&workerThread);
 
-              if (worker.joinable())
+              if (uiReady)
               {
-                  worker.join();
+                  SDL_DestroyRenderer(pRenderer);
+                  SDL_DestroyWindow(pWindow);
+                  SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
               }
 
-              SDL_DestroyRenderer(pRenderer);
-              SDL_DestroyWindow(pWindow);
-              SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
               curl_global_cleanup();
 
-              return !state.failed.load() && contentReady(assetRoot);
+              {
+                  std::lock_guard<std::mutex> lock(state.messageMutex);
+
+                  if (!state.message.empty() && state.failed.load())
+                  {
+                      blog("last message: %s (%s)", state.message.c_str(), state.detail.c_str());
+                  }
+              }
+
+              const bool ready = !state.failed.load() && contentReady(assetRoot);
+              blog("bootstrap finished: ready=%d failed=%d", ready ? 1 : 0, state.failed.load() ? 1 : 0);
+              return ready;
           }
           }
           EOC
@@ -1511,7 +1674,29 @@ jobs:
           mkdir -p dist
           cp build-switch/OpenYAMM.nro dist/
           cp -a build-switch/runtime/shaders dist/
+          cat > dist/README.txt <<'EOR'
+          OpenYAMM for Nintendo Switch
+          ============================
+
+          Copy this whole folder to the SD card as  SD:/switch/openyamm/
+
+            SD:/switch/openyamm/OpenYAMM.nro
+            SD:/switch/openyamm/runtime/shaders/essl/*.bin   (146 files)
+            SD:/switch/openyamm/assets/                      (game content, downloaded)
+
+          Start it with title takeover (hold R while opening the album), not in applet
+          mode: applet mode only has about 100 MB of memory.
+
+          The first start downloads the game content (about 2 GB) and shows a progress
+          screen. If it stops, the reason is written to:
+
+            SD:/switch/openyamm/bootstrap.log     (content download)
+            SD:/switch/openyamm/openyamm.log      (game)
+
+          Downloads resume: start the game again and it continues with the .part files.
+          EOR
           cd dist && zip -r ../openyamm-switch.zip .
+
 
       - name: Upload artifact
         uses: actions/upload-artifact@v7
