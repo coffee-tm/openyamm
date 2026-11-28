@@ -230,6 +230,15 @@ jobs:
               return 0;
           }
           #define posix_memalign openyamm_posix_memalign_stub
+
+          /* newlib has getenv() but no setenv()/unsetenv(): on Switch there is no
+           * process environment to mutate, so these succeed as no-ops. */
+          static inline int openyamm_setenv_stub(const char* _n, const char* _v, int _o) {
+              (void)_n; (void)_v; (void)_o; return 0;
+          }
+          static inline int openyamm_unsetenv_stub(const char* _n) { (void)_n; return 0; }
+          #define setenv   openyamm_setenv_stub
+          #define unsetenv openyamm_unsetenv_stub
           #endif /* OPENYAMM_SWITCH_COMPAT_H */
           SHIM
 
@@ -317,6 +326,21 @@ jobs:
           s = s.replace(marker, inject + marker, 1)
           p.write_text(s)
           print("hooked compat include dir into openyamm_engine")
+
+          # openyamm_game/app/main.cpp calls setenv(), absent from newlib.
+          # Append (not insert) so the target already exists in that scope.
+          p = pathlib.Path("game/CMakeLists.txt")
+          if not p.exists():
+              sys.exit("ERROR: game/CMakeLists.txt not found")
+          s = p.read_text()
+          if "switch-compat/switch-compat.h" not in s:
+              s += ("\n# CI-only: devkitPro newlib compat shim (see switch-build.yml).\n"
+                    "if (TARGET openyamm_game)\n"
+                    "    target_compile_options(openyamm_game PRIVATE\n"
+                    "        -include \"${CMAKE_SOURCE_DIR}/switch-compat/switch-compat.h\")\n"
+                    "endif()\n")
+              p.write_text(s)
+          print("hooked compat shim into openyamm_game")
           PY
           grep -n 'switch-compat' cmake/BgfxRuntime.cmake
 
