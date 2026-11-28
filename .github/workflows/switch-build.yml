@@ -185,16 +185,17 @@ jobs:
           # devkitPro's ffmpeg portlib (libavutil.a/hwcontext_nvtegra.o) calls
           # libnx nvtegra MMU helpers that some libnx builds do not export.
           # The nvtegra hwaccel path is never used by this build, so supply
-          # no-op stubs only when the symbols are genuinely missing.
+          # no-op stubs when the symbol is not *defined* (an 'U' entry in
+          # libnx.a means libnx references it too, not that it provides it).
           if aarch64-none-elf-nm "$DEVKITPRO/libnx/lib/libnx.a" 2>/dev/null \
-               | grep -q 'mmuRequestGet$'; then
+               | grep -qE '^[0-9a-fA-F]+ [TtWw] mmuRequestGet$'; then
             printf 'void __openyamm_compat_anchor(void) {}\n' \
               > "$ROOT/switch-compat/compat.c"
-            echo "libnx exports mmuRequest*; no stub needed"
+            echo "libnx defines mmuRequest*; no stub needed"
           else
             printf 'void mmuRequestGet(void) {}\nvoid mmuRequestSetAndWait(void) {}\n' \
               > "$ROOT/switch-compat/compat.c"
-            echo "libnx lacks mmuRequest*; adding no-op stubs"
+            echo "libnx does not define mmuRequest*; adding no-op stubs"
           fi
           aarch64-none-elf-gcc -c "$ROOT/switch-compat/compat.c" \
             -o "$ROOT/switch-compat/compat.o"
@@ -472,10 +473,24 @@ jobs:
           must(bool(cands), "imgui.cpp not found under build-switch/_deps")
           p = cands[0]
           s = p.read_text()
-          if "IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS" not in s:
-              p.write_text("#define IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS 1"
-                           "  // CI: no fork/execvp on Switch\n" + s)
-          print("patched " + str(p) + " (no shell helpers)")
+          # NOTE: imgui.cpp itself mentions the macro in its own #ifndef guards,
+          # so test for our marker line, not for the bare macro name.
+          if "CI: no fork/execvp on Switch" not in s:
+              s = ("#define IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS 1"
+                   "  // CI: no fork/execvp on Switch\n" + s)
+              # imgui 1.92 installs the default implementation unconditionally;
+              # guard that assignment too, otherwise disabling the function just
+              # turns into an undefined reference to it.
+              old = ("    g.PlatformIO.Platform_OpenInShellFn = "
+                     "Platform_OpenInShellFn_DefaultImpl;\n")
+              must(old in s, "imgui Platform_OpenInShellFn assignment not found")
+              s = s.replace(old,
+                            "#ifndef IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS\n"
+                            + old + "#endif\n", 1)
+              p.write_text(s)
+              print("patched " + str(p) + " (no shell helpers)")
+          else:
+              print("imgui.cpp already patched")
           PY
           grep -nE 'BX_PLATFORM_NX 1|visionOS probe disabled' \
             build-switch/_deps/bx-src/include/bx/platform.h
