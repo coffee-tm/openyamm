@@ -78,6 +78,29 @@ jobs:
           which nacptool elf2nro
           cmake --version | head -n 1
 
+      - name: Prepare build resources
+        run: |
+          echo "==> runner resources"
+          echo "cpus=$(nproc)"
+          free -m || true
+          df -h / | tail -n 1
+
+          # bgfx/bimg/engine translation units are memory hungry. A full
+          # `--parallel` build on a 4 vCPU / 16 GB runner previously tripped the
+          # OOM killer, surfacing as "The hosted runner lost communication with
+          # the server" with the build step still marked in_progress.
+          # 1) add a swap fallback when the container permits it,
+          # 2) the build steps below cap the job count as the real safeguard.
+          if [ ! -f /swapfile ]; then
+            fallocate -l 8G /swapfile 2>/dev/null \
+              || dd if=/dev/zero of=/swapfile bs=1M count=8192 2>/dev/null || true
+            chmod 600 /swapfile 2>/dev/null || true
+            mkswap /swapfile >/dev/null 2>&1 || true
+          fi
+          swapon /swapfile 2>/dev/null && echo "swap enabled" \
+            || echo "swap unavailable (container not privileged); using job cap only"
+          free -m || true
+
       - name: Ensure SDL3 Switch portlib
         run: |
           . /opt/devkitpro/devkita64.sh
@@ -138,9 +161,15 @@ jobs:
 
       - name: Build NRO
         run: |
+          set -o pipefail
           . /opt/devkitpro/devkita64.sh
           export PATH="$DEVKITPRO/tools/bin:$DEVKITPRO/devkita64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH"
           ROOT="$PWD"
+          # Peak memory matters more than wall time here: the runner has 4 vCPU
+          # but a single bgfx renderer TU can take 3-4 GB. -j2 plus the swap
+          # fallback keeps the runner alive; 180 min timeout is ample.
+          JOBS=2
+          echo "==> build jobs: $JOBS"
 
           echo "==> [1/5] Generate devkitPro newlib compat shim + hook bgfx target"
           # devkitPro's newlib is not a full POSIX libc. Upstream bx/bimg/bgfx
@@ -383,16 +412,31 @@ jobs:
             build-switch/_deps/bgfx-src/3rdparty/khronos/EGL/eglplatform.h
 
           echo "==> [4/5] Compile ESSL shaders"
-          cmake --build build-switch --target openyamm_runtime_shaders --parallel
+          cmake --build build-switch --target openyamm_runtime_shaders -j "$JOBS" 2>&1 \
+            | tee build-shaders.log
           shader_count=$(find build-switch/runtime/shaders/essl -maxdepth 1 \
             -name '*.bin' -type f 2>/dev/null | wc -l)
           echo "    $shader_count ESSL shaders"
           [ "$shader_count" -gt 0 ] || { echo "::error::No ESSL shaders produced"; exit 1; }
 
           echo "==> [5/5] Build OpenYAMM.nro"
-          cmake --build build-switch --target openyamm_switch_nro --parallel
+          free -m || true
+          cmake --build build-switch --target openyamm_switch_nro -j "$JOBS" 2>&1 \
+            | tee build-nro.log
           test -f build-switch/OpenYAMM.nro || { echo "::error::OpenYAMM.nro missing"; exit 1; }
           echo "==> Build OK: build-switch/OpenYAMM.nro"
+
+      - name: Keep build logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: build-logs
+          path: |
+            build-shaders.log
+            build-nro.log
+            build-switch/CMakeCache.txt
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Package artifact
         run: |
