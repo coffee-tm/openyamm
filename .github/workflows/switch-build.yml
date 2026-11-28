@@ -258,7 +258,7 @@ jobs:
           constexpr const char *WantedPackages[] = {"engine", "mm8"};
 
           // Bumped whenever this file changes so a log can be matched to an NRO build.
-          constexpr const char *BootstrapTag = "bootstrap-2026-11-28-b";
+          constexpr const char *BootstrapTag = "bootstrap-2026-11-28-c";
           // The download worker gets its own stack: std::thread inherits newlib's default,
           // which is far too small for curl + TLS + the JSON parse (a silent overflow).
           constexpr size_t WorkerStackSize = 512 * 1024;
@@ -967,22 +967,50 @@ jobs:
               {
                   // The pad is only used for the B button; a failure here must not stop the download.
                   SDL_InitSubSystem(SDL_INIT_GAMEPAD);
-                  uiReady = SDL_CreateWindowAndRenderer("OpenYAMM", ScreenWidth * 2, ScreenHeight * 2, 0, &pWindow, &pRenderer);
 
-                  if (!uiReady)
+                  // SDL's Switch video driver refuses to create a window until its EGL is
+                  // loaded (SWITCH_CreateWindow checks _this->egl_data) and SDL only loads it
+                  // for SDL_WINDOW_OPENGL windows, which this one is not.
+                  if (!SDL_GL_LoadLibrary(nullptr))
                   {
-                      blog("cannot open the progress window: %s", SDL_GetError());
+                      blog("SDL_GL_LoadLibrary failed: %s", SDL_GetError());
+                  }
+
+                  pWindow = SDL_CreateWindow("OpenYAMM", ScreenWidth * 2, ScreenHeight * 2, 0);
+
+                  if (pWindow == nullptr)
+                  {
+                      blog("SDL_CreateWindow failed: %s", SDL_GetError());
                   }
                   else
                   {
+                      pRenderer = SDL_CreateRenderer(pWindow, "opengles2");
+
+                      if (pRenderer == nullptr)
+                      {
+                          blog("the opengles2 renderer failed (%s); trying the default one", SDL_GetError());
+                          pRenderer = SDL_CreateRenderer(pWindow, nullptr);
+                      }
+                  }
+
+                  uiReady = (pRenderer != nullptr);
+
+                  if (!uiReady)
+                  {
+                      blog("no progress renderer available: %s", SDL_GetError());
+                  }
+                  else
+                  {
+                      const char *pRendererName = SDL_GetRendererName(pRenderer);
                       SDL_SetRenderLogicalPresentation(pRenderer, ScreenWidth, ScreenHeight,
                                                        SDL_LOGICAL_PRESENTATION_LETTERBOX);
-                      blog("progress window ready");
+                      blog("progress window ready (%s)", pRendererName != nullptr ? pRendererName : "?");
                   }
               }
 
               // Without a window the content still has to arrive, so keep downloading headless.
               uint64_t finishedAt = 0;
+              uint64_t loopCount = 0;
 
               while (true)
               {
@@ -1009,6 +1037,18 @@ jobs:
                   {
                       break;
                   }
+
+                  // Even with no window there is a record: bootstrap.log grows every five
+                  // seconds (a UI frame is 50 ms, a headless poll 200 ms).
+                  const uint64_t logEvery = uiReady ? 100u : 25u;
+
+                  if (state.totalBytes.load() > 0 && loopCount % logEvery == 0)
+                  {
+                      blog("progress %s / %s, pack %d / %d", amountText(state.doneBytes.load()).c_str(),
+                           amountText(state.totalBytes.load()).c_str(), state.donePacks.load(), state.totalPacks.load());
+                  }
+
+                  ++loopCount;
 
                   if (!uiReady)
                   {
@@ -1188,8 +1228,34 @@ jobs:
                   "endif()\n")
               p.write_text(s)
           print("hooked the content bootstrapper into game/CMakeLists.txt")
+
+          # 3. SDL's Switch video driver refuses to create a window until its EGL is
+          #    loaded (SWITCH_CreateWindow checks _this->egl_data), and SDL only loads
+          #    it for SDL_WINDOW_OPENGL windows. The engine renders through bgfx and
+          #    never asks for a GL context, so SDL_CreateWindow failed on hardware.
+          p = pathlib.Path("engine/EngineApplication.cpp")
+          if not p.exists():
+              sys.exit("ERROR: engine/EngineApplication.cpp not found")
+          s = p.read_text()
+          if "CI: Switch needs EGL" not in s:
+              anchor = "    const SdlSubsystemGuard sdlGuard(true);"
+              if anchor not in s:
+                  sys.exit("ERROR: EngineApplication SDL_Init anchor not found")
+              inject = (
+                  "#if defined(OPENYAMM_SWITCH)\n"
+                  "    // CI: Switch needs EGL loaded before SDL can create a window.\n"
+                  "    if (!SDL_GL_LoadLibrary(nullptr))\n"
+                  "    {\n"
+                  "        std::cerr << \"SDL_GL_LoadLibrary failed: \" << SDL_GetError() << '\\n';\n"
+                  "        return 1;\n"
+                  "    }\n"
+                  "#endif\n\n")
+              s = s.replace(anchor, inject + anchor, 1)
+              p.write_text(s)
+          print("patched EngineApplication.cpp (EGL for the Switch window)")
           PY
           grep -n 'SwitchContentBootstrap' game/CMakeLists.txt game/app/SwitchMain.cpp
+          grep -n 'CI: Switch needs EGL' engine/EngineApplication.cpp
 
       - name: Build NRO
         run: |
