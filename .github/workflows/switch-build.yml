@@ -1004,6 +1004,13 @@ jobs:
           if "SwitchContentBootstrap" not in s:
               s += (
                   "\n# CI-only: Switch content bootstrapper (Android x2 content profile).\n"
+                  "if (OPENYAMM_SWITCH)\n"
+                  "    # switch-toolchain/switch.cmake never puts libnx on the include path, and the\n"
+                  "    # devkitA64 image keeps the headers in $DEVKITPRO/libnx/include, so any target\n"
+                  "    # that includes <switch.h> has to be told explicitly. Set it per directory so\n"
+                  "    # every current and future target in game/ sees it.\n"
+                  "    include_directories(\"${DEVKITPRO}/libnx/include\" \"${DEVKITPRO}/portlibs/switch/include\")\n"
+                  "endif()\n"
                   "if (TARGET openyamm_switch AND OPENYAMM_SWITCH)\n"
                   "    target_sources(openyamm_switch PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/SwitchContentBootstrap.cpp)\n"
                   "    find_package(PkgConfig QUIET)\n"
@@ -1478,10 +1485,13 @@ jobs:
             [ -f "$log" ] || continue
             echo "===== $log: error digest ====="
             grep -nE "error:|fatal error|undefined reference|multiple definition|cannot find -l|No rule to make target" "$log" \
-              | head -n 30 \
+              | head -n 20 \
               | while IFS= read -r line; do echo "::error::$log:$line"; done || true
-            echo "===== $log: last 60 lines ====="
-            tail -n 60 "$log" || true
+            echo "===== $log: which target compiled the bootstrapper ====="
+            grep -n "CMakeFiles/.*SwitchContentBootstrap" "$log" | head -n 4 \
+              | while IFS= read -r line; do echo "::error::$log:$line"; done || true
+            echo "===== $log: last 40 lines ====="
+            tail -n 40 "$log" || true
           done
 
       - name: Keep build logs
