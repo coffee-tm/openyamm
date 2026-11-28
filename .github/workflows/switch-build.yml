@@ -159,6 +159,844 @@ jobs:
           cmake --build build-switch-host --target openyamm_shaderc --parallel
           test -x build-switch-host/openyamm_shaderc
 
+      # The console build has no self-updater, so a fresh SD card has no content and
+      # the engine refuses to start. This adds a first-start bootstrap that downloads
+      # the Android content profile (ASTC/x2, which the Tegra GPU reads) into the
+      # packaged layout AssetFileSystem mounts: assets/index.json + assets/packs/*.zip.
+      - name: Add Switch content bootstrapper
+        run: |
+          cat > game/app/SwitchContentBootstrap.h <<'EOH'
+          #pragma once
+
+          #include <filesystem>
+
+          namespace OpenYAMM::Game
+          {
+          // Makes sure the game content is installed below assetRoot (sdmc:/switch/openyamm/assets).
+          // Returns true when the content is ready: either it was already complete, or the
+          // bootstrap downloaded it. Shows its own progress window; needs no game assets.
+          bool switchBootstrapContent(const std::filesystem::path &assetRoot);
+          }
+          EOH
+          cat > game/app/SwitchContentBootstrap.cpp <<'EOC'
+          #include "game/app/SwitchContentBootstrap.h"
+
+          #include <switch.h>
+
+          #include <curl/curl.h>
+          #include <SDL3/SDL.h>
+
+          #include "engine/AssetPackIndex.h"
+          #include "engine/update/ReleaseManifest.h"
+          #include "engine/update/Sha256.h"
+
+          #include <atomic>
+          #include <cstdint>
+          #include <cstdio>
+          #include <filesystem>
+          #include <fstream>
+          #include <mutex>
+          #include <optional>
+          #include <string>
+          #include <system_error>
+          #include <thread>
+          #include <vector>
+
+          // The Switch build has no self-updater (game/app/ContentSetup.cpp returns Quit on
+          // OPENYAMM_SWITCH), so a fresh installation has no way to get the game content.
+          // This bootstrap fills that gap: it downloads the Android content profile, which
+          // carries the x2 surface textures the Switch profile asks for, into the packaged
+          // layout AssetFileSystem mounts (assets/index.json + assets/packs/*.zip).
+          //
+          // TLS verification is left off because libnx's ssl service cannot be handed a CA
+          // bundle here; the manifest is checked against the Ed25519 key compiled into the
+          // game, and every pack against the SHA-256 the signed manifest lists.
+
+          namespace OpenYAMM::Game
+          {
+          namespace
+          {
+          constexpr const char *UpdateBaseUrl = "https://jasicek.net/openyamm/updates/";
+          constexpr const char *ManifestRelativePath = "channels/stable/android-arm64.json";
+          constexpr const char *ManifestPlatform = "android-arm64";
+          constexpr const char *StoreDirectoryName = "packs";
+          constexpr const char *WantedPackages[] = {"engine", "mm8"};
+
+          constexpr int ScreenWidth = 640;
+          constexpr int ScreenHeight = 360;
+          constexpr float Margin = 24.0f;
+          constexpr float GlyphSize = float(SDL_DEBUG_TEXT_FONT_CHARACTER_SIZE);
+
+          struct DownloadState
+          {
+              std::atomic<uint64_t> doneBytes{0};
+              std::atomic<uint64_t> totalBytes{0};
+              std::atomic<int> donePacks{0};
+              std::atomic<int> totalPacks{0};
+              std::atomic<bool> cancel{false};
+              std::atomic<bool> finished{false};
+              std::atomic<bool> failed{false};
+              std::mutex messageMutex;
+              std::string message = "Checking the content server...";
+              std::string detail;
+          };
+
+          void setMessage(DownloadState &state, const std::string &message, const std::string &detail = {})
+          {
+              std::lock_guard<std::mutex> lock(state.messageMutex);
+              state.message = message;
+              state.detail = detail;
+          }
+
+          void fail(DownloadState &state, const std::string &message)
+          {
+              setMessage(state, message);
+              state.failed.store(true);
+              state.finished.store(true);
+          }
+
+          std::string amountText(uint64_t bytes)
+          {
+              char buffer[32] = {};
+
+              if (bytes >= 1024ull * 1024ull * 1024ull)
+              {
+                  std::snprintf(buffer, sizeof(buffer), "%.2f GB", double(bytes) / (1024.0 * 1024.0 * 1024.0));
+              }
+              else
+              {
+                  std::snprintf(buffer, sizeof(buffer), "%.0f MB", double(bytes) / (1024.0 * 1024.0));
+              }
+
+              return buffer;
+          }
+
+          bool contentReady(const std::filesystem::path &assetRoot)
+          {
+              std::string error;
+              const std::optional<Engine::AssetPackIndex> index =
+                  Engine::loadAssetPackIndex(assetRoot / Engine::AssetPackIndexFileName, error);
+
+              return index && Engine::validateAssetPackFiles(*index, assetRoot / index->store, error);
+          }
+
+          size_t writeToMemory(char *pData, size_t elementSize, size_t elementCount, void *pUserData)
+          {
+              const size_t bytes = elementSize * elementCount;
+              static_cast<std::string *>(pUserData)->append(pData, bytes);
+              return bytes;
+          }
+
+          struct FileSink
+          {
+              std::FILE *pFile = nullptr;
+              DownloadState *pState = nullptr;
+          };
+
+          size_t writeToFile(char *pData, size_t elementSize, size_t elementCount, void *pUserData)
+          {
+              auto *pSink = static_cast<FileSink *>(pUserData);
+              const size_t bytes = elementSize * elementCount;
+
+              if (pSink->pState->cancel.load())
+              {
+                  return 0;
+              }
+
+              if (std::fwrite(pData, 1, bytes, pSink->pFile) != bytes)
+              {
+                  return 0;
+              }
+
+              pSink->pState->doneBytes.fetch_add(bytes);
+              return bytes;
+          }
+
+          int checkCancel(void *pUserData, curl_off_t, curl_off_t, curl_off_t, curl_off_t)
+          {
+              return static_cast<DownloadState *>(pUserData)->cancel.load() ? 1 : 0;
+          }
+
+          void configureCommon(CURL *pCurl)
+          {
+              curl_easy_setopt(pCurl, CURLOPT_FOLLOWLOCATION, 1L);
+              curl_easy_setopt(pCurl, CURLOPT_MAXREDIRS, 5L);
+              curl_easy_setopt(pCurl, CURLOPT_CONNECTTIMEOUT, 30L);
+              curl_easy_setopt(pCurl, CURLOPT_LOW_SPEED_LIMIT, 1024L);
+              curl_easy_setopt(pCurl, CURLOPT_LOW_SPEED_TIME, 120L);
+              curl_easy_setopt(pCurl, CURLOPT_SSL_VERIFYPEER, 0L);
+              curl_easy_setopt(pCurl, CURLOPT_SSL_VERIFYHOST, 0L);
+              curl_easy_setopt(pCurl, CURLOPT_USERAGENT, "OpenYAMM-Switch/1.0");
+              curl_easy_setopt(pCurl, CURLOPT_NOSIGNAL, 1L);
+          }
+
+          bool httpGetText(const std::string &url, std::string &text, std::string &error)
+          {
+              CURL *pCurl = curl_easy_init();
+
+              if (pCurl == nullptr)
+              {
+                  error = "cannot create an HTTP request";
+                  return false;
+              }
+
+              text.clear();
+              configureCommon(pCurl);
+              curl_easy_setopt(pCurl, CURLOPT_URL, url.c_str());
+              curl_easy_setopt(pCurl, CURLOPT_WRITEFUNCTION, writeToMemory);
+              curl_easy_setopt(pCurl, CURLOPT_WRITEDATA, &text);
+
+              const CURLcode result = curl_easy_perform(pCurl);
+              long status = 0;
+              curl_easy_getinfo(pCurl, CURLINFO_RESPONSE_CODE, &status);
+              curl_easy_cleanup(pCurl);
+
+              if (result != CURLE_OK)
+              {
+                  error = std::string(curl_easy_strerror(result)) + " for " + url;
+                  return false;
+              }
+
+              if (status != 200)
+              {
+                  error = "HTTP " + std::to_string(int(status)) + " for " + url;
+                  return false;
+              }
+
+              return true;
+          }
+
+          bool httpDownload(const std::string &url, const std::filesystem::path &part, uint64_t offset,
+                            DownloadState *pState, std::string &error)
+          {
+              std::FILE *pFile = std::fopen(part.string().c_str(), offset > 0 ? "ab" : "wb");
+
+              if (pFile == nullptr)
+              {
+                  error = "cannot write " + part.string();
+                  return false;
+              }
+
+              CURL *pCurl = curl_easy_init();
+
+              if (pCurl == nullptr)
+              {
+                  std::fclose(pFile);
+                  error = "cannot start an HTTP transfer";
+                  return false;
+              }
+
+              FileSink sink{pFile, pState};
+              configureCommon(pCurl);
+              curl_easy_setopt(pCurl, CURLOPT_URL, url.c_str());
+              curl_easy_setopt(pCurl, CURLOPT_WRITEFUNCTION, writeToFile);
+              curl_easy_setopt(pCurl, CURLOPT_WRITEDATA, &sink);
+              curl_easy_setopt(pCurl, CURLOPT_NOPROGRESS, 0L);
+              curl_easy_setopt(pCurl, CURLOPT_XFERINFOFUNCTION, checkCancel);
+              curl_easy_setopt(pCurl, CURLOPT_XFERINFODATA, pState);
+
+              if (offset > 0)
+              {
+                  curl_easy_setopt(pCurl, CURLOPT_RESUME_FROM_LARGE, static_cast<curl_off_t>(offset));
+              }
+
+              const CURLcode result = curl_easy_perform(pCurl);
+              long status = 0;
+              curl_easy_getinfo(pCurl, CURLINFO_RESPONSE_CODE, &status);
+              curl_easy_cleanup(pCurl);
+              std::fclose(pFile);
+
+              if (result != CURLE_OK)
+              {
+                  error = std::string(curl_easy_strerror(result)) + " for " + url;
+                  return false;
+              }
+
+              if (status != 200 && status != 206)
+              {
+                  error = "HTTP " + std::to_string(int(status)) + " for " + url;
+                  return false;
+              }
+
+              // A server that ignores Range sends the whole file: the partial data on disk
+              // would be glued in front of it.
+              if (offset > 0 && status == 200)
+              {
+                  error = "the server ignored the resume request";
+                  return false;
+              }
+
+              return true;
+          }
+
+          bool wantsPackage(const std::string &package)
+          {
+              for (const char *pName : WantedPackages)
+              {
+                  if (package == pName)
+                  {
+                      return true;
+                  }
+              }
+
+              return false;
+          }
+
+          std::string escapeJson(const std::string &text)
+          {
+              std::string escaped;
+              escaped.reserve(text.size() + 8);
+
+              for (const char character : text)
+              {
+                  if (character == '"' || character == '\\')
+                  {
+                      escaped.push_back('\\');
+                  }
+
+                  escaped.push_back(character);
+              }
+
+              return escaped;
+          }
+
+          std::string buildIndexJson(const Engine::ReleaseManifest &manifest, const std::vector<size_t> &selected)
+          {
+              std::string text;
+              text += "{\n";
+              text += " \"schema\": 1,\n";
+              text += " \"release\": \"" + escapeJson(manifest.release) + "\",\n";
+              text += " \"build\": \"" + escapeJson(manifest.build) + "\",\n";
+              text += " \"profile\": \"" + std::string(ManifestPlatform) + "\",\n";
+              text += " \"content_format\": " + std::to_string(manifest.contentFormat) + ",\n";
+              text += " \"store\": \"" + std::string(StoreDirectoryName) + "\",\n";
+              text += " \"packs\": [\n";
+
+              for (size_t position = 0; position < selected.size(); ++position)
+              {
+                  const Engine::AssetPackRecord &pack = manifest.packs[selected[position]];
+                  text += "  {\"id\": \"" + escapeJson(pack.id) + "\", \"package\": \"" + escapeJson(pack.package)
+                      + "\", \"mount\": \"" + escapeJson(pack.mount) + "\", \"file\": \"" + escapeJson(pack.file)
+                      + "\", \"size\": " + std::to_string(pack.size) + ", \"content_id\": \""
+                      + escapeJson(pack.contentId) + "\", \"sha256\": \"" + escapeJson(pack.sha256) + "\"}";
+
+                  if (position + 1 < selected.size())
+                  {
+                      text += ",";
+                  }
+
+                  text += "\n";
+              }
+
+              text += " ]\n}\n";
+              return text;
+          }
+
+          bool downloadPack(const std::string &url, const std::filesystem::path &target,
+                            const Engine::AssetPackRecord &pack, DownloadState *pState, std::string &error)
+          {
+              const std::filesystem::path part(target.string() + ".part");
+
+              for (int attempt = 0; attempt < 2; ++attempt)
+              {
+                  std::error_code fileError;
+                  uint64_t offset = 0;
+                  const uintmax_t existing = std::filesystem::file_size(part, fileError);
+
+                  if (!fileError && existing <= pack.size)
+                  {
+                      offset = existing;
+                  }
+                  else
+                  {
+                      std::filesystem::remove(part, fileError);
+                  }
+
+                  const uint64_t doneBefore = pState->doneBytes.load();
+
+                  if (!httpDownload(url, part, offset, pState, error))
+                  {
+                      pState->doneBytes.store(doneBefore);
+
+                      if (pState->cancel.load())
+                      {
+                          return false;
+                      }
+
+                      std::filesystem::remove(part, fileError);
+                      continue;
+                  }
+
+                  const uintmax_t size = std::filesystem::file_size(part, fileError);
+
+                  if (fileError || size != pack.size)
+                  {
+                      pState->doneBytes.store(doneBefore);
+                      std::filesystem::remove(part, fileError);
+                      error = "the pack " + pack.file + " has the wrong size";
+                      continue;
+                  }
+
+                  const std::optional<std::string> digest = Engine::sha256File(part);
+
+                  if (!digest || *digest != pack.sha256)
+                  {
+                      pState->doneBytes.store(doneBefore);
+                      std::filesystem::remove(part, fileError);
+                      error = "the pack " + pack.file + " failed its checksum";
+                      continue;
+                  }
+
+                  std::filesystem::remove(target, fileError);
+                  std::filesystem::rename(part, target, fileError);
+
+                  if (fileError)
+                  {
+                      error = "cannot move " + part.string() + " into place";
+                      return false;
+                  }
+
+                  return true;
+              }
+
+              return false;
+          }
+
+          void runDownload(std::filesystem::path assetRoot, DownloadState *pState)
+          {
+              std::string error;
+
+              setMessage(*pState, "Checking the content server...");
+
+              const std::string manifestUrl = std::string(UpdateBaseUrl) + ManifestRelativePath;
+              std::string manifestText;
+              std::string signatureText;
+
+              if (!httpGetText(manifestUrl, manifestText, error)
+                  || !httpGetText(manifestUrl + ".sig", signatureText, error))
+              {
+                  fail(*pState, "Cannot reach the content server. Connect the console to the internet and start again.",
+                       error);
+                  return;
+              }
+
+              if (!Engine::verifyManifestSignature(manifestText, signatureText, Engine::releaseManifestPublicKeys(),
+                                                   error))
+              {
+                  fail(*pState, "The content list did not verify; the download was stopped.", error);
+                  return;
+              }
+
+              std::optional<Engine::ReleaseManifest> manifest = Engine::parseReleaseManifest(manifestText, error);
+
+              if (!manifest || manifest->platform != ManifestPlatform)
+              {
+                  fail(*pState, "The content server sent an unexpected release.",
+                       manifest ? manifest->platform : error);
+                  return;
+              }
+
+              if (manifest->contentFormat != Engine::SupportedContentFormat)
+              {
+                  fail(*pState, "This build cannot read the published content format.",
+                       std::to_string(manifest->contentFormat));
+                  return;
+              }
+
+              std::vector<size_t> selected;
+
+              for (size_t index = 0; index < manifest->packs.size(); ++index)
+              {
+                  const Engine::AssetPackRecord &pack = manifest->packs[index];
+
+                  if (!pack.language.empty() || !wantsPackage(pack.package))
+                  {
+                      continue;
+                  }
+
+                  selected.push_back(index);
+              }
+
+              if (selected.empty())
+              {
+                  fail(*pState, "The published release has no content for this build.");
+                  return;
+              }
+
+              std::error_code fileError;
+              const std::filesystem::path storeRoot = assetRoot / StoreDirectoryName;
+              std::filesystem::create_directories(storeRoot, fileError);
+
+              struct Job
+              {
+                  size_t packIndex = 0;
+                  uint64_t offset = 0;
+              };
+
+              std::vector<Job> jobs;
+              uint64_t totalBytes = 0;
+              int presentPacks = 0;
+
+              for (const size_t index : selected)
+              {
+                  const Engine::AssetPackRecord &pack = manifest->packs[index];
+                  const std::filesystem::path target = storeRoot / pack.file;
+                  const uintmax_t size = std::filesystem::file_size(target, fileError);
+
+                  if (!fileError && size == pack.size)
+                  {
+                      ++presentPacks;
+                      continue;
+                  }
+
+                  const std::filesystem::path part(target.string() + ".part");
+                  const uintmax_t partSize = std::filesystem::file_size(part, fileError);
+                  uint64_t offset = 0;
+
+                  if (!fileError && partSize <= pack.size)
+                  {
+                      offset = partSize;
+                  }
+
+                  jobs.push_back(Job{index, offset});
+                  totalBytes += pack.size - offset;
+              }
+
+              pState->totalBytes.store(totalBytes);
+              pState->totalPacks.store(int(selected.size()));
+              pState->donePacks.store(presentPacks);
+
+              for (size_t position = 0; position < jobs.size(); ++position)
+              {
+                  if (pState->cancel.load())
+                  {
+                      pState->finished.store(true);
+                      return;
+                  }
+
+                  const Job &job = jobs[position];
+                  const Engine::AssetPackRecord &pack = manifest->packs[job.packIndex];
+                  const std::filesystem::path target = storeRoot / pack.file;
+
+                  setMessage(*pState, "Downloading the game content",
+                             "Pack " + std::to_string(position + 1) + " of " + std::to_string(jobs.size()) + ": "
+                                 + pack.package);
+
+                  if (!downloadPack(std::string(UpdateBaseUrl) + manifest->packUrls[job.packIndex], target, pack,
+                                    pState, error))
+                  {
+                      if (pState->cancel.load())
+                      {
+                          pState->finished.store(true);
+                          return;
+                      }
+
+                      fail(*pState,
+                           "The download stopped. Check the connection and start the game again; finished packs are "
+                           "kept.",
+                           error);
+                      return;
+                  }
+
+                  pState->donePacks.fetch_add(1);
+              }
+
+              setMessage(*pState, "Finishing the installation...");
+              const std::string indexText = buildIndexJson(*manifest, selected);
+              const std::filesystem::path indexTemporary = assetRoot / "index.json.tmp";
+
+              {
+                  std::ofstream output(indexTemporary, std::ios::binary | std::ios::trunc);
+                  output.write(indexText.data(), std::streamsize(indexText.size()));
+                  output.flush();
+
+                  if (!output)
+                  {
+                      fail(*pState, "Cannot write the content index to the SD card.");
+                      return;
+                  }
+              }
+
+              std::filesystem::remove(assetRoot / Engine::AssetPackIndexFileName, fileError);
+              std::filesystem::rename(indexTemporary, assetRoot / Engine::AssetPackIndexFileName, fileError);
+
+              if (fileError)
+              {
+                  fail(*pState, "Cannot write the content index to the SD card.");
+                  return;
+              }
+
+              pState->finished.store(true);
+          }
+
+          std::vector<std::string> wrapText(const std::string &text, size_t columns)
+          {
+              std::vector<std::string> lines;
+              std::string line;
+              size_t start = 0;
+
+              while (start < text.size())
+              {
+                  size_t end = text.find(' ', start);
+                  end = end == std::string::npos ? text.size() : end;
+                  const std::string word = text.substr(start, end - start);
+
+                  if (!line.empty() && line.size() + 1 + word.size() > columns)
+                  {
+                      lines.push_back(line);
+                      line.clear();
+                  }
+
+                  line += (line.empty() ? "" : " ") + word;
+                  start = end + 1;
+              }
+
+              if (!line.empty())
+              {
+                  lines.push_back(line);
+              }
+
+              return lines;
+          }
+
+          void drawLine(SDL_Renderer *pRenderer, float x, float y, float scale, const std::string &text)
+          {
+              SDL_SetRenderScale(pRenderer, scale, scale);
+              SDL_RenderDebugText(pRenderer, x / scale, y / scale, text.c_str());
+              SDL_SetRenderScale(pRenderer, 1.0f, 1.0f);
+          }
+          }
+
+          bool switchBootstrapContent(const std::filesystem::path &assetRoot)
+          {
+              if (contentReady(assetRoot))
+              {
+                  return true;
+              }
+
+              std::error_code directoryError;
+              std::filesystem::create_directories(assetRoot, directoryError);
+
+              const Result socketResult = socketInitializeDefault();
+
+              if (R_FAILED(socketResult))
+              {
+                  std::fprintf(stderr, "Switch content bootstrap: socketInitializeDefault failed: %08x\n",
+                               socketResult);
+                  return false;
+              }
+
+              if (curl_global_init(CURL_GLOBAL_DEFAULT) != CURLE_OK)
+              {
+                  std::fprintf(stderr, "Switch content bootstrap: curl_global_init failed\n");
+                  return false;
+              }
+
+              DownloadState state;
+              std::thread worker(runDownload, assetRoot, &state);
+
+              bool uiReady = SDL_InitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
+              SDL_Window *pWindow = nullptr;
+              SDL_Renderer *pRenderer = nullptr;
+
+              if (uiReady)
+              {
+                  uiReady = SDL_CreateWindowAndRenderer("OpenYAMM", ScreenWidth * 2, ScreenHeight * 2, 0, &pWindow,
+                                                        &pRenderer);
+              }
+
+              if (!uiReady)
+              {
+                  std::fprintf(stderr, "Switch content bootstrap: cannot open the progress window: %s\n",
+                               SDL_GetError());
+                  state.cancel.store(true);
+                  worker.join();
+                  curl_global_cleanup();
+                  return false;
+              }
+
+              SDL_SetRenderLogicalPresentation(pRenderer, ScreenWidth, ScreenHeight,
+                                               SDL_LOGICAL_PRESENTATION_LETTERBOX);
+
+              uint64_t finishedAt = 0;
+
+              while (true)
+              {
+                  SDL_Event event;
+
+                  while (SDL_PollEvent(&event))
+                  {
+                      if (event.type == SDL_EVENT_QUIT
+                          || (event.type == SDL_EVENT_GAMEPAD_BUTTON_DOWN
+                              && event.gbutton.button == SDL_GAMEPAD_BUTTON_EAST)
+                          || (event.type == SDL_EVENT_KEY_DOWN && event.key.key == SDLK_ESCAPE))
+                      {
+                          state.cancel.store(true);
+                      }
+                  }
+
+                  const bool finished = state.finished.load();
+
+                  if (finished && !state.failed.load())
+                  {
+                      break;
+                  }
+
+                  if (finished && finishedAt == 0)
+                  {
+                      finishedAt = SDL_GetTicks();
+                  }
+
+                  std::string message;
+                  std::string detail;
+                  {
+                      std::lock_guard<std::mutex> lock(state.messageMutex);
+                      message = state.message;
+                      detail = state.detail;
+                  }
+
+                  SDL_SetRenderDrawColor(pRenderer, 10, 10, 13, 255);
+                  SDL_RenderClear(pRenderer);
+                  SDL_SetRenderDrawColor(pRenderer, 214, 178, 106, 255);
+                  drawLine(pRenderer, Margin, Margin, 2.0f, "OpenYAMM content setup");
+
+                  SDL_SetRenderDrawColor(pRenderer, 232, 226, 210, 255);
+                  float y = Margin + 40.0f;
+
+                  for (const std::string &line : wrapText(message, 70))
+                  {
+                      drawLine(pRenderer, Margin, y, 1.0f, line);
+                      y += GlyphSize + 6.0f;
+                  }
+
+                  y += GlyphSize;
+
+                  if (!detail.empty())
+                  {
+                      SDL_SetRenderDrawColor(pRenderer, 170, 166, 158, 255);
+
+                      for (const std::string &line : wrapText(detail, 70))
+                      {
+                          drawLine(pRenderer, Margin, y, 1.0f, line);
+                          y += GlyphSize + 6.0f;
+                      }
+                  }
+
+                  const uint64_t total = state.totalBytes.load();
+                  const uint64_t done = state.doneBytes.load();
+
+                  if (total > 0)
+                  {
+                      const SDL_FRect frame = {Margin, 200.0f, float(ScreenWidth) - 2.0f * Margin, 18.0f};
+                      const float fraction = float(double(done) / double(total));
+                      const SDL_FRect bar = {frame.x + 2.0f, frame.y + 2.0f, (frame.w - 4.0f) * fraction,
+                                             frame.h - 4.0f};
+                      SDL_SetRenderDrawColor(pRenderer, 120, 98, 58, 255);
+                      SDL_RenderRect(pRenderer, &frame);
+                      SDL_SetRenderDrawColor(pRenderer, 214, 178, 106, 255);
+                      SDL_RenderFillRect(pRenderer, &bar);
+
+                      SDL_SetRenderDrawColor(pRenderer, 232, 226, 210, 255);
+                      drawLine(pRenderer, Margin, 228.0f, 1.0f,
+                               amountText(done) + " of " + amountText(total) + "   -   pack "
+                                   + std::to_string(state.donePacks.load()) + " / "
+                                   + std::to_string(state.totalPacks.load()));
+                  }
+
+                  SDL_SetRenderDrawColor(pRenderer, 170, 166, 158, 255);
+                  drawLine(pRenderer, Margin, float(ScreenHeight) - Margin - GlyphSize, 1.0f,
+                           state.failed.load() ? "Press B to close"
+                                               : "Keep the console on. Press B to cancel.");
+
+                  SDL_RenderPresent(pRenderer);
+
+                  if (finishedAt != 0 && SDL_GetTicks() - finishedAt > 20000)
+                  {
+                      break;
+                  }
+
+                  SDL_Delay(50);
+              }
+
+              state.cancel.store(true);
+
+              if (worker.joinable())
+              {
+                  worker.join();
+              }
+
+              SDL_DestroyRenderer(pRenderer);
+              SDL_DestroyWindow(pWindow);
+              SDL_QuitSubSystem(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
+              curl_global_cleanup();
+
+              return !state.failed.load() && contentReady(assetRoot);
+          }
+          }
+          EOC
+          grep -c 'switchBootstrapContent' game/app/SwitchContentBootstrap.cpp
+
+      - name: Hook the bootstrapper into the game
+        run: |
+          python3 - <<'PY'
+          import pathlib
+          import sys
+
+          # 1. Call the bootstrap from the Switch entry point, before the engine
+          #    initialises AssetFileSystem (it refuses to start without content).
+          p = pathlib.Path("game/app/SwitchMain.cpp")
+          if not p.exists():
+              sys.exit("ERROR: game/app/SwitchMain.cpp not found")
+          s = p.read_text()
+          if "SwitchContentBootstrap.h" not in s:
+              old = '#include "game/app/OpenYammMain.h"'
+              if old not in s:
+                  sys.exit("ERROR: SwitchMain include anchor not found")
+              s = s.replace(old, old + '\n#include "game/app/SwitchContentBootstrap.h"', 1)
+              anchor = "    const int result = runWithSwitchArguments(argc, argv);"
+              if anchor not in s:
+                  sys.exit("ERROR: SwitchMain call anchor not found")
+              inject = (
+                  "    // The console has no updater: fetch the game content before the engine mounts it.\n"
+                  "    if (!OpenYAMM::Game::switchBootstrapContent(\n"
+                  "            std::filesystem::path(OPENYAMM_SWITCH_USER_DATA_DIR) / \"assets\"))\n"
+                  "    {\n"
+                  "        std::fprintf(stderr, \"Switch content setup did not finish; the game cannot start.\\n\");\n"
+                  "        unmountRomfs();\n"
+                  "        return 3;\n"
+                  "    }\n\n")
+              s = s.replace(anchor, inject + anchor, 1)
+              p.write_text(s)
+          print("hooked the content bootstrap into SwitchMain.cpp")
+
+          # 2. Build the new file into openyamm_game and link switch-curl.
+          p = pathlib.Path("game/CMakeLists.txt")
+          if not p.exists():
+              sys.exit("ERROR: game/CMakeLists.txt not found")
+          s = p.read_text()
+          if "SwitchContentBootstrap" not in s:
+              s += (
+                  "\n# CI-only: Switch content bootstrapper (Android x2 content profile).\n"
+                  "if (TARGET openyamm_game AND OPENYAMM_SWITCH)\n"
+                  "    target_sources(openyamm_game PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/app/SwitchContentBootstrap.cpp)\n"
+                  "    find_package(PkgConfig QUIET)\n"
+                  "    if (NOT PKG_CONFIG_FOUND)\n"
+                  "        message(FATAL_ERROR \"the Switch content bootstrapper needs pkg-config and switch-curl\")\n"
+                  "    endif()\n"
+                  "    pkg_check_modules(SWITCH_CURL REQUIRED libcurl)\n"
+                  "    target_include_directories(openyamm_game PRIVATE ${SWITCH_CURL_INCLUDE_DIRS})\n"
+                  "    if (TARGET openyamm_switch)\n"
+                  "        target_link_directories(openyamm_switch PRIVATE ${SWITCH_CURL_LIBRARY_DIRS})\n"
+                  "        # curl is static: its private deps (zlib, libnx) have to follow it.\n"
+                  "        target_link_libraries(openyamm_switch PRIVATE\n"
+                  "            ${SWITCH_CURL_STATIC_LIBRARIES} z openyammcompat nx)\n"
+                  "    endif()\n"
+                  "endif()\n")
+              p.write_text(s)
+          print("hooked the content bootstrapper into game/CMakeLists.txt")
+          PY
+          grep -n 'SwitchContentBootstrap' game/CMakeLists.txt game/app/SwitchMain.cpp
+
       - name: Build NRO
         run: |
           # NOTE: the devkitpro image has no bash, so GitHub runs every step as
@@ -382,6 +1220,7 @@ jobs:
           print("hooked compat shim + link paths into openyamm_game")
           PY
           grep -n 'switch-compat' cmake/BgfxRuntime.cmake
+
 
           echo "==> [2/5] Configure Switch cross build"
           # CMake 3.31 FindPkgConfig stores PKG_CONFIG_VERSION in a function
