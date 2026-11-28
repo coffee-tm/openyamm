@@ -180,7 +180,7 @@ jobs:
           # are compiled into the single openyamm_bgfx target, so inject a shim
           # into that target only (do NOT touch CMAKE_CXX_FLAGS: the toolchain
           # puts -march/-mtp=soft/-fPIE in CMAKE_CXX_FLAGS_INIT).
-          mkdir -p "$ROOT/switch-compat"
+          mkdir -p "$ROOT/switch-compat/lib"
           cat > "$ROOT/switch-compat/switch-compat.h" <<'SHIM'
           #ifndef OPENYAMM_SWITCH_COMPAT_H
           #define OPENYAMM_SWITCH_COMPAT_H
@@ -328,7 +328,11 @@ jobs:
           print("hooked compat include dir into openyamm_engine")
 
           # openyamm_game/app/main.cpp calls setenv(), absent from newlib.
-          # Append (not insert) so the target already exists in that scope.
+          # Also add the devkitPro link search paths: the toolchain passes
+          # -specs=switch.specs (which pulls in -lnx), but nothing puts
+          # $DEVKITPRO/libnx/lib or $DEVKITPRO/portlibs/switch/lib on the -L
+          # line, so the final link cannot resolve -lnx/-lEGL/-lglapi.
+          # Append (not insert) so the targets already exist in that scope.
           p = pathlib.Path("game/CMakeLists.txt")
           if not p.exists():
               sys.exit("ERROR: game/CMakeLists.txt not found")
@@ -339,8 +343,16 @@ jobs:
                     "    target_compile_options(openyamm_game PRIVATE\n"
                     "        -include \"${CMAKE_SOURCE_DIR}/switch-compat/switch-compat.h\")\n"
                     "endif()\n")
+          if "devkitPro sysroot link paths" not in s:
+              s += ("\n# CI-only: devkitPro sysroot link paths (libnx + switch portlibs).\n"
+                    "if (TARGET openyamm_switch)\n"
+                    "    target_link_directories(openyamm_switch PRIVATE\n"
+                    "        \"$ENV{DEVKITPRO}/libnx/lib\"\n"
+                    "        \"$ENV{DEVKITPRO}/portlibs/switch/lib\"\n"
+                    "        \"${CMAKE_SOURCE_DIR}/switch-compat/lib\")\n"
+                    "endif()\n")
               p.write_text(s)
-          print("hooked compat shim into openyamm_game")
+          print("hooked compat shim + link paths into openyamm_game")
           PY
           grep -n 'switch-compat' cmake/BgfxRuntime.cmake
 
@@ -455,6 +467,22 @@ jobs:
 
           echo "==> [5/5] Build OpenYAMM.nro"
           free -m || true
+          echo "-- link library inventory --"
+          ls -1 "$DEVKITPRO/libnx/lib" 2>/dev/null | grep -iE 'libnx|libdl' || true
+          ls -1 "$DEVKITPRO/portlibs/switch/lib" 2>/dev/null \
+            | grep -iE 'EGL|glapi|drm|GLES' || true
+          # Nothing on Switch needs a dynamic loader (bx stubs dlopen for NX),
+          # but some dependency pkg-config files still emit -ldl. Provide an
+          # empty archive when the image ships none.
+          if [ ! -f "$DEVKITPRO/libnx/lib/libdl.a" ] && \
+             [ ! -f "$DEVKITPRO/portlibs/switch/lib/libdl.a" ]; then
+            echo 'void __openyamm_dl_placeholder(void) {}' > "$ROOT/switch-compat/dl.c"
+            aarch64-none-elf-gcc -c "$ROOT/switch-compat/dl.c" \
+              -o "$ROOT/switch-compat/dl.o"
+            aarch64-none-elf-ar rcs "$ROOT/switch-compat/lib/libdl.a" \
+              "$ROOT/switch-compat/dl.o"
+            echo "created empty libdl.a (no dynamic loader on Switch)"
+          fi
           rc=0
           cmake --build build-switch --target openyamm_switch_nro -j "$JOBS" \
             > build-nro.log 2>&1 || rc=$?
