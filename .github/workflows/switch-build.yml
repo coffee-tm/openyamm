@@ -181,6 +181,26 @@ jobs:
           # into that target only (do NOT touch CMAKE_CXX_FLAGS: the toolchain
           # puts -march/-mtp=soft/-fPIE in CMAKE_CXX_FLAGS_INIT).
           mkdir -p "$ROOT/switch-compat/lib"
+
+          # devkitPro's ffmpeg portlib (libavutil.a/hwcontext_nvtegra.o) calls
+          # libnx nvtegra MMU helpers that some libnx builds do not export.
+          # The nvtegra hwaccel path is never used by this build, so supply
+          # no-op stubs only when the symbols are genuinely missing.
+          if aarch64-none-elf-nm "$DEVKITPRO/libnx/lib/libnx.a" 2>/dev/null \
+               | grep -q 'mmuRequestGet$'; then
+            printf 'void __openyamm_compat_anchor(void) {}\n' \
+              > "$ROOT/switch-compat/compat.c"
+            echo "libnx exports mmuRequest*; no stub needed"
+          else
+            printf 'void mmuRequestGet(void) {}\nvoid mmuRequestSetAndWait(void) {}\n' \
+              > "$ROOT/switch-compat/compat.c"
+            echo "libnx lacks mmuRequest*; adding no-op stubs"
+          fi
+          aarch64-none-elf-gcc -c "$ROOT/switch-compat/compat.c" \
+            -o "$ROOT/switch-compat/compat.o"
+          aarch64-none-elf-ar rcs "$ROOT/switch-compat/lib/libopenyammcompat.a" \
+            "$ROOT/switch-compat/compat.o"
+          echo "built libopenyammcompat.a"
           cat > "$ROOT/switch-compat/switch-compat.h" <<'SHIM'
           #ifndef OPENYAMM_SWITCH_COMPAT_H
           #define OPENYAMM_SWITCH_COMPAT_H
@@ -350,6 +370,7 @@ jobs:
                     "        \"$ENV{DEVKITPRO}/libnx/lib\"\n"
                     "        \"$ENV{DEVKITPRO}/portlibs/switch/lib\"\n"
                     "        \"${CMAKE_SOURCE_DIR}/switch-compat/lib\")\n"
+                    "    target_link_libraries(openyamm_switch PRIVATE openyammcompat)\n"
                     "endif()\n")
               p.write_text(s)
           print("hooked compat shim + link paths into openyamm_game")
@@ -441,6 +462,20 @@ jobs:
           must(n == 1, "luaconf.h LUA_INT_DEFAULT line not found")
           p.write_text(s2)
           print("patched lua luaconf.h (64-bit long integers)")
+
+          # --- imgui: drop the POSIX shell helpers ---
+          # Platform_OpenInShellFn_DefaultImpl uses fork/execvp/waitpid, none of
+          # which exist in newlib. Switch homebrew never opens a shell.
+          deps = pathlib.Path("build-switch/_deps")
+          cands = sorted(deps.glob("imgui*/imgui.cpp")) or \
+              sorted(p for p in deps.glob("*/imgui.cpp"))
+          must(bool(cands), "imgui.cpp not found under build-switch/_deps")
+          p = cands[0]
+          s = p.read_text()
+          if "IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS" not in s:
+              p.write_text("#define IMGUI_DISABLE_DEFAULT_SHELL_FUNCTIONS 1"
+                           "  // CI: no fork/execvp on Switch\n" + s)
+          print("patched " + str(p) + " (no shell helpers)")
           PY
           grep -nE 'BX_PLATFORM_NX 1|visionOS probe disabled' \
             build-switch/_deps/bx-src/include/bx/platform.h
