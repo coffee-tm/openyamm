@@ -161,7 +161,9 @@ jobs:
 
       - name: Build NRO
         run: |
-          set -o pipefail
+          # NOTE: the devkitpro image has no bash, so GitHub runs every step as
+          # `sh -e` (dash). Do not use bash-only features such as pipefail;
+          # keep this script POSIX and capture exit codes explicitly.
           . /opt/devkitpro/devkita64.sh
           export PATH="$DEVKITPRO/tools/bin:$DEVKITPRO/devkita64/bin:$DEVKITPRO/portlibs/switch/bin:$PATH"
           ROOT="$PWD"
@@ -412,8 +414,16 @@ jobs:
             build-switch/_deps/bgfx-src/3rdparty/khronos/EGL/eglplatform.h
 
           echo "==> [4/5] Compile ESSL shaders"
-          cmake --build build-switch --target openyamm_runtime_shaders -j "$JOBS" 2>&1 \
-            | tee build-shaders.log
+          rc=0
+          cmake --build build-switch --target openyamm_runtime_shaders -j "$JOBS" \
+            > build-shaders.log 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::Shader build failed (rc=$rc)"
+            grep -n 'error:' build-shaders.log | head -n 40 || true
+            tail -n 60 build-shaders.log || true
+            exit "$rc"
+          fi
+          tail -n 15 build-shaders.log || true
           shader_count=$(find build-switch/runtime/shaders/essl -maxdepth 1 \
             -name '*.bin' -type f 2>/dev/null | wc -l)
           echo "    $shader_count ESSL shaders"
@@ -421,8 +431,17 @@ jobs:
 
           echo "==> [5/5] Build OpenYAMM.nro"
           free -m || true
-          cmake --build build-switch --target openyamm_switch_nro -j "$JOBS" 2>&1 \
-            | tee build-nro.log
+          rc=0
+          cmake --build build-switch --target openyamm_switch_nro -j "$JOBS" \
+            > build-nro.log 2>&1 || rc=$?
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::NRO build failed (rc=$rc)"
+            grep -nE 'error:|undefined reference|Error [0-9]' build-nro.log | head -n 60 || true
+            echo "--- tail ---"
+            tail -n 80 build-nro.log || true
+            exit "$rc"
+          fi
+          tail -n 20 build-nro.log || true
           test -f build-switch/OpenYAMM.nro || { echo "::error::OpenYAMM.nro missing"; exit 1; }
           echo "==> Build OK: build-switch/OpenYAMM.nro"
 
